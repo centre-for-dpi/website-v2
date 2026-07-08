@@ -1,0 +1,92 @@
+html,
+body {
+  font-size: 16px !important;
+  font-family: "Outfit", sans-serif;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+.purple-section-separator {
+  height: 1px;
+  width: 100%;
+  background: linear-gradient(90deg, #D6E1F1 0%, #6564DB 50%, #D6E1F1 100%);
+  border: none;
+  margin: 0;
+}
+
+.page-height {
+  min-height: 350px;
+}
+
+.navbar-default {
+  border: 0px;
+  background-color: transparent;
+}
+
+
+.flex-box {
+  display: -webkit-box;
+  display: -webkit-flex;
+  display: -ms-flexbox;
+  display: flex;
+
+  -webkit-flex-flow: row wrap;
+  flex-flow: row wrap;
+}
+
+.flex-box-center {
+  display: -webkit-box;
+  display: -webkit-flex;
+  display: -ms-flexbox;
+  display: flex;
+
+  -webkit-flex-flow: row wrap;
+  flex-flow: row wrap;
+
+  align-items: center;
+  -webkit-align-items: center;
+}
+
+.alignright {
+  display: inline;
+  float: right;
+  margin-left: 1.5em;
+}
+
+.alignleft {
+  display: inline;
+  float: left;
+  margin-right: 1.5em;
+}
+
+.aligncenter {
+  clear: both;
+  display: block;
+  margin: 0 auto;
+}
+
+.stolo-signup {
+  background: rgba(44, 44, 119, 1);
+  width: 100%;
+  border-radius: 8px;
+  vertical-align: middle;
+  color: rgba(255, 255, 255, 1);
+  font-family: "Outfit", sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 135%;
+  letter-spacing: 0.15px;
+  padding-top: 18px;
+  padding-bottom: 18px;
+
+  &:hover {
+    background: rgba(84, 84, 238, 1);
+  }
+
+  @media (min-width: 992px) {
+    max-width: 235px;
+  }
+}

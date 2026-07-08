@@ -1,0 +1,54 @@
+/******************************************************************
+Theme Name: CDPI Theme
+Theme URI: http://think201.com
+Description: CDPI Custom Made Theme
+Author: Think201
+Author URI: http://www.think201.com
+Version: 1.0
+Tags: 
+
+License: http://think201.com
+License URI: http://think201.com
+
+******************************************************************/
+
+.sticky {}
+
+.gallery-caption {}
+
+.bypostauthor {}
+
+.size-auto,
+.size-full,
+.size-large,
+.size-medium,
+.size-thumbnail {
+    max-width: 100%;
+    height: auto;
+}
+
+.wp-caption {}
+
+.wp-caption-text
+.screen-reader-text {}
+
+.alignright {
+    text-align: right;
+}
+
+.alignleft {
+    text-align: left;
+}
+
+.aligncenter {
+    text-align: center;
+}
+
+.purple-section-separator {
+    display: block;
+    height: 1px;
+    width: 100%;
+    background: linear-gradient(90deg, #D6E1F1 0%, #6564DB 50%, #D6E1F1 100%);
+    border: 0;
+    margin: 0;
+}

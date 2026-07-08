@@ -1,0 +1,44 @@
+/* Banner Style*/
+
+.common-section {
+  position: relative;
+  height: 341px;
+  height: auto;
+
+  // min-height: 341px;
+  .common-overlay {
+    background: rgba(0, 0, 0, 0.5);
+  }
+
+  .common-banner {
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: center;
+    padding: 50px 0px 50px 0px;
+    opacity: 1.0275;
+    height: 341px;
+
+    h1 {
+      margin: 0;
+      color: #ffffff;
+      font-family: "Outfit", sans-serif;
+      font-weight: normal;
+      padding: 75px 0px 20px 0px;
+      z-index: 50;
+    }
+
+    p {
+
+      color: #ffffff;
+      padding-bottom: 75px;
+      letter-spacing: 1px;
+    }
+  }
+}
+
+.page-header {
+  color: #fff;
+  text-align: center;
+  background-color: #159957;
+  background-image: linear-gradient(120deg, #155799, #159957);
+}
