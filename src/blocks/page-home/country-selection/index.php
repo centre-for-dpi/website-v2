@@ -8,6 +8,19 @@ $countries = $countryHandler->getListOfPosts([
     'order' => 'ASC',
 ]);
 
+$status_priority = [
+    'live' => 0,
+    'engaged' => 1,
+];
+
+usort($countries, static function ($a, $b) use ($status_priority) {
+    $a_status = strtolower(trim($a['meta_fields']['status'] ?? ''));
+    $b_status = strtolower(trim($b['meta_fields']['status'] ?? ''));
+    $a_rank = $status_priority[$a_status] ?? 2;
+    $b_rank = $status_priority[$b_status] ?? 2;
+    return $a_rank <=> $b_rank;
+});
+
 foreach ($countries as &$country) {
     $flag = $country['meta_fields']['flag'] ?? $country['meta_fields']['country_flag'] ?? '';
     if (is_numeric($flag)) {
