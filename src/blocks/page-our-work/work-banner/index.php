@@ -1,6 +1,6 @@
 <section class="redlof-block work-banner">
   <div class="work-banner__wrapper">
-    <img src="<?php echo Helper::getImagePath('images/our-work/our-work-banner-v1.jpg'); ?>" alt="Our work" loading="lazy" />
+    <img src="<?php echo Helper::getImagePath('images/our-work/our-work-banner.jpg'); ?>" alt="Our work" loading="lazy" />
   </div>
 </section>
 
