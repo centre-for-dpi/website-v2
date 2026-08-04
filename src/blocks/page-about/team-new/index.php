@@ -444,6 +444,7 @@ foreach ($global_team_posts as $member_post) {
   font-size: 1.125rem;
   line-height: 1.5;
   color: #111827;
+  white-space: pre-wrap;
 }
 
 .team-card__name {
