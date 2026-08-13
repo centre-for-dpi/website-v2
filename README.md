@@ -58,7 +58,7 @@ The compiled output in `public/` is committed to the repo (it's not gitignored) 
 git status                 # review what changed (PHP + public/js, public/css, webpack.manifest.json)
 git add <changed files>
 git commit -m "Describe what changed"
-git push origin master
+git push origin main
 ```
 
 Notes:

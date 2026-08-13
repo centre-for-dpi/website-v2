@@ -8,18 +8,18 @@
           <img src="<?php echo Helper::getImagePath('patterns/cube-pattern-1.svg'); ?>" alt="CDPI" loading="lazy" />
         </div>
         <h2 class="res-assistant__title mb-4">
-          Learn with the DPI AI assistant
+          Experience Verifiably
         </h2>
         <p class="res-assistant__desc mb-5">
-          Have questions about Digital Public Infrastructure?
+          A unified interface to issue, hold and verify credentials seamlessly
         </p>
         <a 
-          href="https://assistant.cdpi.dev/" 
+          href="https://verifiably.bootcamp.cdpi.dev/" 
           target="_blank" 
           class="res-assistant__cta btn btn-primary" 
-          aria-label="Try the DPI Assistant" 
+          aria-label="Try Verifiably" 
           style="display: inline-flex; align-items: center; gap: 14px; min-width: 264px; min-height: 60px; border-radius: 7px; background: #4B4AEA; box-shadow: none; border: none; justify-content: center;">
-          Try the DPI Assistant
+          Try Verifiably
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-left: 8px;">
             <path d="M6 12H18M18 12L13.5 7.5M18 12L13.5 16.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
@@ -28,7 +28,7 @@
 
       <!-- Right Column -->
       <div class="col-lg-7 res-assistant__right">
-        <img src="<?php echo Helper::getImagePath('images/resources/dpi-assistant-preview.png'); ?>" alt="DPI AI Assistant preview" class="res-assistant__preview-img" loading="lazy" />
+        <img src="<?php echo Helper::getImagePath('images/resources/verifiably-preview.png'); ?>" alt="Verifiably preview" class="res-assistant__preview-img" loading="lazy" />
       </div>
 
     </div>
