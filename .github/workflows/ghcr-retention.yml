@@ -1,0 +1,164 @@
+name: GHCR retention
+
+# ADR-004 retention policy for ghcr.io/centre-for-dpi/website-v2:
+#   * untagged manifests      -> deleted (every run, no age condition)
+#   * sha-<40hex> tags        -> deleted once older than `older_than_days` (default 90)
+#   * v<X.Y.Z> release tags   -> never deleted
+#   * safety floor            -> the newest 10 sha- tagged versions always survive,
+#                               whatever their age
+#
+# Runbook: docs/runbooks/30-ghcr-retention.md
+
+on:
+  schedule:
+    # Monday 03:00 UTC. Scheduled runs are always non-dry-run.
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'List what would be deleted without deleting anything'
+        type: boolean
+        default: true
+      older_than_days:
+        description: 'Delete sha- tags older than this many days'
+        type: string
+        default: '90'
+
+permissions:
+  contents: read
+  packages: write
+
+# The cleanup action is not safe to run twice in parallel against the same
+# package. Never cancel a run in flight: a half-finished deletion pass is
+# worse than a delayed one.
+concurrency:
+  group: ghcr-retention
+  cancel-in-progress: false
+
+env:
+  PACKAGE_OWNER: centre-for-dpi
+  PACKAGE_NAME: website-v2
+  # Newest N sha- tagged versions that survive regardless of age.
+  KEEP_N_TAGGED: '10'
+
+jobs:
+  retention:
+    name: Prune GHCR images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve run parameters
+        id: params
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_OLDER_THAN_DAYS: ${{ inputs.older_than_days }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            dry_run="$INPUT_DRY_RUN"
+            days="$INPUT_OLDER_THAN_DAYS"
+          else
+            dry_run='false'
+            days='90'
+          fi
+
+          case "$days" in
+            '' | *[!0-9]*)
+              echo "::error::older_than_days must be a positive integer, got '${days}'"
+              exit 1
+              ;;
+          esac
+          if [ "$days" -lt 1 ] || [ "$days" -gt 3650 ]; then
+            echo "::error::older_than_days must be between 1 and 3650, got '${days}'"
+            exit 1
+          fi
+
+          {
+            echo "dry_run=${dry_run}"
+            echo "older_than=${days} days"
+            echo "days=${days}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "dry run: ${dry_run}"
+          echo "sha- tag age threshold: ${days} days"
+
+      - name: Check the package exists
+        id: package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          # The package is created by the release workflow on the first merge to
+          # main (WP3). Until then the cleanup action would hard-fail on a 404,
+          # so gate it. A 404 is a skip; anything else (auth, rate limit) is a
+          # real failure and must not be swallowed.
+          if out=$(gh api "/orgs/${PACKAGE_OWNER}/packages/container/${PACKAGE_NAME}" 2>&1); then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+            echo "Package ${PACKAGE_OWNER}/${PACKAGE_NAME} found."
+          elif printf '%s' "$out" | grep -q '404'; then
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+            echo "::notice::Container package ${PACKAGE_OWNER}/${PACKAGE_NAME} does not exist yet - nothing to prune. It is created by the release workflow on the first merge to main."
+          else
+            echo "::error::Could not query the container package ${PACKAGE_OWNER}/${PACKAGE_NAME}."
+            printf '%s\n' "$out"
+            exit 1
+          fi
+
+      # Ordered before the untagged sweep so that anything the tag pass strands
+      # is mopped up in the same run.
+      - name: Prune aged sha- tags
+        if: steps.package.outputs.exists == 'true'
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          owner: ${{ env.PACKAGE_OWNER }}
+          packages: ${{ env.PACKAGE_NAME }}
+          # Only sha- tags are candidates. exclude-tags is applied before every
+          # other rule, so release tags are removed from the working set first
+          # and can never be deleted or untagged.
+          delete-tags: 'sha-*'
+          exclude-tags: 'v*'
+          older-than: ${{ steps.params.outputs.older_than }}
+          # With delete-tags set, keep-n-tagged applies only to the matched
+          # subset: of the sha- tags older than the threshold, the newest N are
+          # kept and the rest deleted. Everything younger than the threshold is
+          # already out of scope, so the effective floor is at least N.
+          keep-n-tagged: ${{ env.KEEP_N_TAGGED }}
+          validate: true
+          dry-run: ${{ steps.params.outputs.dry_run }}
+
+      # Separate step because older-than narrows *every* rule in the action,
+      # including delete-untagged. Untagged manifests are pruned with no age
+      # condition, so they cannot share a step with the 90-day tag rule.
+      - name: Sweep untagged manifests
+        if: steps.package.outputs.exists == 'true'
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          owner: ${{ env.PACKAGE_OWNER }}
+          packages: ${{ env.PACKAGE_NAME }}
+          delete-untagged: true
+          exclude-tags: 'v*'
+          validate: true
+          dry-run: ${{ steps.params.outputs.dry_run }}
+
+      - name: Summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo '## GHCR retention'
+            echo
+            echo "| Setting | Value |"
+            echo "| --- | --- |"
+            echo "| Package | \`ghcr.io/${PACKAGE_OWNER}/${PACKAGE_NAME}\` |"
+            echo "| Trigger | \`${{ github.event_name }}\` |"
+            echo "| Dry run | \`${{ steps.params.outputs.dry_run }}\` |"
+            echo "| sha- tag age threshold | ${{ steps.params.outputs.days }} days |"
+            echo "| Safety floor (newest sha- kept) | ${KEEP_N_TAGGED} |"
+            echo "| Package exists | \`${{ steps.package.outputs.exists }}\` |"
+            echo
+            echo 'Release tags (`v*`) are never deleted. See `docs/runbooks/30-ghcr-retention.md`.'
+          } >> "$GITHUB_STEP_SUMMARY"
