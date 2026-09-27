@@ -1,0 +1,9 @@
+# Installed as /etc/sudoers.d/cdpi-deploy, mode 0440, root:root.
+# install.sh validates it with `visudo -cf` BEFORE moving it into
+# /etc/sudoers.d, so a syntax error can never lock the host out of sudo.
+#
+# The deploy user's entire privilege is this one script and nothing else.
+# The script re-validates its own arguments, so no wildcard is needed here
+# and none is used: `sudo cdpi-deploy-root` cannot be turned into
+# `sudo anything-else`.
+deploy ALL=(root) NOPASSWD: /usr/local/sbin/cdpi-deploy-root

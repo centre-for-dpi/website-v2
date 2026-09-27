@@ -1,0 +1,75 @@
+#!/bin/bash
+# cdpi-deploy — sshd ForceCommand wrapper for the `deploy` user.
+#
+# Installed at /usr/local/bin/cdpi-deploy, mode 0755, root:root.
+# sshd runs it for every session as the `deploy` user (see
+# sshd_config.d-cdpi-deploy.conf), so the requested command arrives in
+# SSH_ORIGINAL_COMMAND and is never interpreted by a shell.
+#
+# Accepts exactly three commands and nothing else:
+#   deploy <sha-[0-9a-f]{40}|vMAJOR.MINOR.PATCH>
+#   rollback
+#   status
+#
+# Everything else — an interactive session, extra words, a different case,
+# shell metacharacters, newlines — is logged and refused with exit 126.
+# There is no eval anywhere in this script, and no user-supplied text is
+# ever expanded as code.
+#
+# CDPI_DEPLOY_DRY=1 prints the command it would run instead of calling sudo.
+# Used by test-cdpi-deploy.sh; has no effect under sshd, which does not
+# forward the variable (no AcceptEnv for it).
+set -euo pipefail
+
+ROOT_HELPER=/usr/local/sbin/cdpi-deploy-root
+TAG_RE='^(sha-[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+)$'
+# Letters, digits, dot, plain space, hyphen. Nothing else, ever.
+SAFE_RE='^[A-Za-z0-9. -]+$'
+
+cmd=${SSH_ORIGINAL_COMMAND:-}
+
+log() { logger -t cdpi-deploy "$1" 2>/dev/null || true; }
+
+reject() {
+	log "REJECTED from ${SSH_CLIENT:-?}: ${cmd}"
+	echo "cdpi-deploy: refused." >&2
+	echo "Allowed: 'deploy <sha-...40hex|vX.Y.Z>' | 'rollback' | 'status'" >&2
+	exit 126
+}
+
+# Whitelist the whole string before looking at it: letters, digits, dot,
+# hyphen and plain spaces only. This is what kills `;`, `|`, `$(`, backticks,
+# quotes, tabs and newlines — including the newline case that a bare `read`
+# would otherwise truncate away (e.g. "status\nls").
+if [[ ! $cmd =~ $SAFE_RE ]]; then
+	reject
+fi
+
+# Split on spaces only. Runs of spaces collapse; no globbing, no expansion.
+IFS=' ' read -r -a words <<<"$cmd"
+
+action=${words[0]:-}
+tag=
+
+case $action in
+status | rollback)
+	[[ ${#words[@]} -eq 1 ]] || reject
+	;;
+deploy)
+	[[ ${#words[@]} -eq 2 ]] || reject
+	tag=${words[1]}
+	[[ $tag =~ $TAG_RE ]] || reject
+	;;
+*)
+	reject
+	;;
+esac
+
+log "ACCEPTED from ${SSH_CLIENT:-?}: ${action} ${tag}"
+
+if [[ ${CDPI_DEPLOY_DRY:-0} == 1 ]]; then
+	printf 'WOULD RUN: sudo -n %s %s %s\n' "$ROOT_HELPER" "$action" "$tag"
+	exit 0
+fi
+
+exec sudo -n "$ROOT_HELPER" "$action" "$tag"
