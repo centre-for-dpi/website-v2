@@ -1,0 +1,23 @@
+# Shadow overlay — WP8 production dress rehearsal, no traffic taken.
+#
+# Apache keeps serving the live site on 80/443 while this stack runs the
+# new image on loopback only. Caddy is parked in an inactive profile
+# ("disabled" is never passed to --profile), so `up` starts wordpress alone
+# and nothing contends for ports 80/443.
+#
+# Usage:
+#   IMAGE_TAG=sha-<sha> docker compose \
+#     -f compose.yaml -f compose.production.yaml -f compose.shadow.yaml up -d
+#   curl -sS -H 'Host: <domain>' -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/
+#   docker compose -f ... -f compose.shadow.yaml down
+services:
+  caddy:
+    profiles:
+      - disabled
+
+  wordpress:
+    ports:
+      - "127.0.0.1:8080:80"
+    environment:
+      # No cron from the shadow container: the live site owns scheduled work.
+      DISABLE_WP_CRON: "true"

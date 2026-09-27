@@ -1,0 +1,35 @@
+# Staging overlay: the database runs as a container on this host.
+#
+# The noindex header is NOT set here. It comes from CADDY_ENV=staging in
+# /etc/cdpi/caddy.env, which makes the single Caddyfile import its
+# robots_staging snippet. That keeps one Caddyfile for both environments.
+services:
+  db:
+    image: mysql:8.4.11
+    restart: unless-stopped
+    # MYSQL_ROOT_PASSWORD / MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD
+    env_file:
+      - ${CDPI_ETC:-/etc/cdpi}/db.env
+    # 2 GB box: cap InnoDB so MySQL, WordPress, Caddy and the OS coexist.
+    command: --innodb-buffer-pool-size=256M
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  wordpress:
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db_data:

@@ -1,0 +1,80 @@
+# CDPI website — base compose stack (both environments).
+#
+# Overlays:
+#   staging     -f compose.yaml -f compose.staging.yaml
+#   production  -f compose.yaml -f compose.production.yaml
+#   shadow test -f compose.yaml -f compose.production.yaml -f compose.shadow.yaml
+#
+# The project name is pinned so volume names are predictable
+# (cdpi_uploads, cdpi_caddy_data, cdpi_caddy_config, cdpi_db_data);
+# cdpi-deploy-root inspects cdpi_uploads by name.
+#
+# CDPI_ETC exists only so CI and local validation can point the env_file
+# entries at a throwaway directory. On a host it is unset and resolves
+# to /etc/cdpi.
+name: cdpi
+
+services:
+  caddy:
+    image: caddy:2.11.4
+    restart: unless-stopped
+    depends_on:
+      - wordpress
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    # Supplies SITE_HOST, CADDY_TLS and CADDY_ENV, which the Caddyfile
+    # reads as {$SITE_HOST} / import tls_{$CADDY_TLS} / import robots_{$CADDY_ENV}.
+    env_file:
+      - ${CDPI_ETC:-/etc/cdpi}/caddy.env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  wordpress:
+    # Deliberately fails fast rather than pulling a stale or empty tag.
+    image: ghcr.io/centre-for-dpi/website-v2:${IMAGE_TAG:?set IMAGE_TAG}
+    restart: unless-stopped
+    # NOTE: no ports here. Only Caddy is published; the app is reachable
+    # only on the compose network. compose.shadow.yaml is the one exception.
+    env_file:
+      - ${CDPI_ETC:-/etc/cdpi}/app.env
+    volumes:
+      - uploads:/var/www/html/wp-content/uploads
+    tmpfs:
+      - /tmp
+    healthcheck:
+      # The image's wp-config trusts X-Forwarded-Proto, so the header keeps
+      # WordPress from issuing an https redirect to a plain-http probe.
+      # curl is present in the official wordpress:*-apache images.
+      test:
+        ["CMD-SHELL", "curl -fsS -H 'X-Forwarded-Proto: https' -o /dev/null http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  uploads:
+  caddy_data:
+  caddy_config:
+
+networks:
+  default:
+    ipam:
+      config:
+        # Pinned so the production MySQL grant (172.30.0.%) and the ufw
+        # rule for port 3306 stay correct across recreations.
+        - subnet: 172.30.0.0/24

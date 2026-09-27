@@ -1,0 +1,10 @@
+# Production overlay: MySQL stays on the host, untouched by deploys.
+#
+# WORDPRESS_DB_HOST in /etc/cdpi/app.env must be host.docker.internal.
+# The host MySQL needs a user granted for 172.30.0.% and must listen on
+# the docker0/bridge address (see docs/runbooks/03-production-prepare.md
+# for the bind-address change and the socket bind-mount alternative).
+services:
+  wordpress:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
