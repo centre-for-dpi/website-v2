@@ -46,20 +46,6 @@ jobs:
       - name: Check PHP syntax
         env:
           PHP_IMAGE: php:8.2-cli
-          # Files that already fail `php -l` on main. Both were pushed straight
-          # to main in 3e4208a ("Latest code checked in") with debug scaffolding
-          # left in place, before any CI existed:
-          #   index.php:3         die("thi is index")  - no semicolon
-          #   single-video.php:7  $postHandler->set    - no semicolon, no call
-          # Fixing them changes theme behaviour and does not belong in the pull
-          # request that only introduces CI, so they are recorded here instead of
-          # this check failing on a defect it did not cause. The list cannot rot:
-          # the step fails if an entry starts parsing or stops existing, so the
-          # only way to clear one is to delete it here in the same change that
-          # fixes the file. It must reach zero.
-          PHP_LINT_BASELINE: |
-            ./index.php
-            ./single-video.php
         run: |
           set -euo pipefail
 
@@ -83,9 +69,10 @@ jobs:
             -print0 >"$work/files"
 
           # One `php -l` per file, so one bad file cannot mask the rest: every
-          # result is recorded and the verdict is decided afterwards. The loop
-          # runs inside a single container because one container for the whole
-          # tree takes seconds where one container per file takes minutes.
+          # result is recorded and all of them are reported, rather than the run
+          # stopping at the first failure. The loop runs inside a single
+          # container because one container for the whole tree takes seconds
+          # where one container per file takes minutes.
           cat >"$work/lint.sh" <<'INNER'
           #!/usr/bin/env bash
           set -uo pipefail
@@ -100,7 +87,11 @@ jobs:
             return 0
           }
           export -f check_one
-          xargs -0 -n1 bash -c 'check_one "$0"' </ci/files
+          # -r matters: without it, xargs on empty input still runs the command
+          # once with no argument, which would `php -l` the literal string "bash"
+          # and report a file that does not exist instead of letting the
+          # "no PHP files found" guard below fire.
+          xargs -0 -r -n1 bash -c 'check_one "$0"' </ci/files
           INNER
 
           docker run --rm -v "$PWD":/app -w /app -v "$work":/ci "$PHP_IMAGE" \
@@ -116,60 +107,21 @@ jobs:
             exit 1
           fi
 
+          # Every PHP file in the theme must parse. There is no allowlist: a file
+          # that php -l rejects is a file that is a fatal error the moment
+          # WordPress includes it, so the only correct verdict is to fail.
+          # Reporting is line-based below, which assumes no newline in a PHP
+          # filename; the scan itself is NUL-safe either way.
           if [ "$n_failed" -gt 0 ]; then
             echo "----- php -l output for every file that did not parse -----"
             cat "$work/messages"
             echo "----------------------------------------------------------"
-          fi
-
-          # Classification below is line-based, which assumes no newline in a
-          # PHP filename; the scan itself is NUL-safe either way.
-          printf '%s\n' "$PHP_LINT_BASELINE" \
-            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' \
-            | sort -u >"$work/baseline"
-          sort -u "$work/failed" >"$work/failed.sorted"
-          sort -u "$work/passed" >"$work/passed.sorted"
-          sort -u "$work/passed" "$work/failed" >"$work/seen.sorted"
-
-          new_failures="$(comm -23 "$work/failed.sorted" "$work/baseline")"
-          known_failures="$(comm -12 "$work/failed.sorted" "$work/baseline")"
-          now_parsing="$(comm -12 "$work/passed.sorted" "$work/baseline")"
-          stale_baseline="$(comm -13 "$work/seen.sorted" "$work/baseline")"
-
-          status=0
-
-          if [ -n "$known_failures" ]; then
-            while IFS= read -r file; do
-              echo "::warning file=$file::php -l fails here; the file is on PHP_LINT_BASELINE in .github/workflows/ci.yml and still needs fixing"
-            done <<<"$known_failures"
-          fi
-
-          if [ -n "$new_failures" ]; then
             while IFS= read -r file; do
               echo "::error file=$file::php -l failed"
               echo "php -l failed: $file" >&2
-            done <<<"$new_failures"
-            status=1
+            done <"$work/failed"
+            exit 1
           fi
-
-          if [ -n "$now_parsing" ]; then
-            {
-              echo "These files now parse. Delete them from PHP_LINT_BASELINE in"
-              echo ".github/workflows/ci.yml so the check starts enforcing them:"
-              printf '%s\n' "$now_parsing"
-            } >&2
-            status=1
-          fi
-
-          if [ -n "$stale_baseline" ]; then
-            {
-              echo "PHP_LINT_BASELINE lists files that were not found. Delete them:"
-              printf '%s\n' "$stale_baseline"
-            } >&2
-            status=1
-          fi
-
-          exit "$status"
 
   # Job id and name are both "build" for the same reason as "lint" above.
   build:
