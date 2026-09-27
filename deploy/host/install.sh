@@ -320,18 +320,24 @@ step_accounts() {
 		changed "created user deploy (locked password, shell /bin/bash)"
 	fi
 
-	# docker group membership is what lets the root script's docker calls work
-	# for troubleshooting as deploy; the deploy user still needs sudo for the
-	# root script itself.
-	if getent group docker >/dev/null 2>&1; then
-		if id -nG deploy 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
-			already "deploy is in group docker"
-		elif [[ $CHECK == 1 ]]; then
-			would "usermod -aG docker deploy"
+	# The deploy user must NOT be in group docker. Membership of that group is
+	# root-equivalent (it can bind-mount / into a privileged container), and it
+	# would grant that power outside the ForceCommand wrapper entirely — which
+	# is exactly what the ADR-008 correction rules out: sudo limited to one
+	# root script, nothing else. cdpi-deploy-root already runs as root via
+	# `sudo -n`, so every docker call it makes is root's, not deploy's.
+	#
+	# Enforced rather than merely omitted, so a host where an earlier version
+	# of this script (or a hand edit) added it gets fixed on the next run.
+	if id -nG deploy 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+		if [[ $CHECK == 1 ]]; then
+			would "gpasswd -d deploy docker (docker group membership is root-equivalent)"
 		else
-			usermod -aG docker deploy
-			changed "added deploy to group docker"
+			gpasswd -d deploy docker >/dev/null
+			changed "removed deploy from group docker (root-equivalent access outside the forced command)"
 		fi
+	else
+		already "deploy is not in group docker (correct: that would be root-equivalent)"
 	fi
 }
 

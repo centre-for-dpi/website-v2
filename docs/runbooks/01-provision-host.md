@@ -98,8 +98,12 @@ getent group cdpi-admins breakglass docker
 id deploy
 ls -l /etc/ssh/authorized_keys.d/
 
-# the deploy user's privilege is exactly one script
+# the deploy user's privilege is exactly one script, and nothing else
 sudo -l -U deploy
+
+# deploy must NOT be in group docker: that is root-equivalent and would apply
+# outside the forced command. Expect no output.
+id -nG deploy | tr ' ' '\n' | grep -x docker
 
 # sshd: effective settings for the deploy user, and globally
 sudo sshd -T -C user=deploy | grep -iE 'forcecommand|permittty|allowtcpforwarding|allowagentforwarding|permittunnel'
@@ -115,7 +119,10 @@ Expect: `forcecommand /usr/local/bin/cdpi-deploy`, `permittty no`, all
 forwarding `no`; `permitrootlogin no`, `passwordauthentication no`,
 `allowgroups` listing `cdpi-admins`, `deploy`, `breakglass` (26.04 prints them
 on separate lines); ufw allowing only 22/80/443 (plus 3306 from
-`172.30.0.0/24` on production).
+`172.30.0.0/24` on production); `sudo -l -U deploy` listing exactly
+`/usr/local/sbin/cdpi-deploy-root` and the `id -nG deploy` grep printing
+nothing. `install.sh` removes `deploy` from group `docker` if it finds it
+there, so a rerun fixes a host where it was added by hand.
 
 The parser that guards the SSH entry point has its own test; run it from a
 checkout at any time:
