@@ -3,9 +3,14 @@
   "private": true,
   "version": "1.0.0",
   "description": "WordPress theme for the CDPI Website",
+  "engines": {
+    "node": ">=22 <23"
+  },
   "scripts": {
     "build": "webpack --node-env=production",
-    "dev": "webpack watch --node-env=development"
+    "dev": "webpack watch --node-env=development",
+    "lint": "prettier --check styles/",
+    "format": "prettier --write styles/"
   },
   "lint-staged": {
     "styles/**/*.{js,jsx,ts,tsx,json,scss}": "prettier --write"
@@ -20,11 +25,6 @@
     "css-loader": "^6.8.1",
     "css-minimizer-webpack-plugin": "^5.0.1",
     "husky": "^8.0.3",
-    "image-minimizer-webpack-plugin": "^3.8.3",
-    "imagemin": "^8.0.1",
-    "imagemin-gifsicle": "^7.0.0",
-    "imagemin-optipng": "^8.0.0",
-    "imagemin-svgo": "^10.0.1",
     "lint-staged": "^13.2.3",
     "mini-css-extract-plugin": "^2.9.4",
     "postcss-loader": "^7.3.3",
@@ -37,8 +37,6 @@
     "webpackbar": "^5.0.2"
   },
   "dependencies": {
-    "-": "^0.0.1",
-    "g": "^2.0.1",
     "web-vitals": "^4.2.4"
   }
 }

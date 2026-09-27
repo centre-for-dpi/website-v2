@@ -65,4 +65,4 @@ Notes:
 
 - Always run `npm run build` (not just `npm run dev`) before your final commit — dev output is unminified and not content-hashed, and shouldn't be pushed.
 - Make sure `public/webpack.manifest.json` is included in the commit whenever `public/js` or `public/css` change — a stale manifest will point PHP at bundle filenames that no longer exist.
-- The repo currently has one branch (`master`) with direct pushes — there is no PR/staging branch in use.
+- The default branch is `main`, and changes are currently pushed to it directly — there is no PR/staging branch in use yet.

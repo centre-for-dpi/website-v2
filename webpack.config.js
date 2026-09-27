@@ -3,7 +3,6 @@ const fs = require("fs");
 const MiniCssExtractPlugin = require("mini-css-extract-plugin");
 const CssMinimizerPlugin = require("css-minimizer-webpack-plugin");
 const CopyPlugin = require("copy-webpack-plugin");
-const ImageMinimizerPlugin = require("image-minimizer-webpack-plugin");
 const { WebpackManifestPlugin } = require("webpack-manifest-plugin");
 const BrowserSyncPlugin = require("browser-sync-webpack-plugin");
 const WebpackBar = require("webpackbar");
@@ -97,30 +96,19 @@ module.exports = {
       publicPath: "/public",
       filter: (file) => /\.(js|css)$/.test(file.name),
     }),
-    new BrowserSyncPlugin({
-      ui: false,
-      notify: false,
-      proxy: config.browserSyncProxy,
-    }),
+    ...(isDev
+      ? [
+          new BrowserSyncPlugin({
+            ui: false,
+            notify: false,
+            proxy: config.browserSyncProxy,
+          }),
+        ]
+      : []),
     ...(!isDev ? [new WebpackBar()] : []),
   ],
   optimization: {
-    minimizer: [
-      `...`,
-      new CssMinimizerPlugin(),
-      ...(!isDev
-        ? [
-            // new ImageMinimizerPlugin({
-            //   minimizer: {
-            //     implementation: ImageMinimizerPlugin.imageminMinify,
-            //     options: {
-            //       plugins: ["optipng", "gifsicle", "svgo"],
-            //     },
-            //   },
-            // }),
-          ]
-        : []),
-    ],
+    minimizer: [`...`, new CssMinimizerPlugin()],
   },
   devtool: isDev ? "source-map" : false,
   stats: "errors-warnings",
