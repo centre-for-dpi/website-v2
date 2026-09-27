@@ -1,0 +1,38 @@
+# admins.txt — the named human accounts on the CDPI hosts.
+#
+# Plain text rather than YAML on purpose: install.sh parses it with `while
+# IFS=$'\t' read`, so the hosts need no YAML parser and no Python.
+#
+# Format — one line per human:
+#     <username><TAB><ssh public key, including its comment>
+#
+# Blank lines and lines beginning with # are ignored. The separator is a
+# single TAB, because the key comment itself contains spaces. Exactly one key
+# per line; to give someone two keys, write two lines with the same username.
+#
+# Rules:
+#   * One line per human. No shared accounts, ever — that is the entire point
+#     of this file. The April 2026 incident (ADR context) was unattributable
+#     precisely because everyone logged in as the same user.
+#   * Never add a key on someone else's behalf. Each person generates their
+#     own key on their own machine and sends only the public half:
+#         ssh-keygen -t ed25519 -a 64 -f ~/.ssh/cdpi-staging -C "<name>@cdpi staging admin"
+#   * The `deploy` user is NOT listed here. It is not a human, it has no sudo
+#     beyond one script, and its key is installed by the bootstrap runbook
+#     directly into /etc/ssh/authorized_keys.d/deploy.
+#   * The cloud provider's default account (`ubuntu` on EC2, the Lightsail
+#     default user) is NOT listed here either. It is break-glass; see
+#     `install.sh --seal-default-user`.
+#   * install.sh REPLACES /etc/ssh/authorized_keys.d/<user> from this file, so
+#     deleting a line and rerunning install.sh on every host revokes that
+#     access. It does not delete the account — do that by hand once you are
+#     sure nothing of theirs is still running.
+#   * Accounts created from this file join group `cdpi-admins`, which has
+#     passwordless sudo. Attribution comes from the named account plus the
+#     sudo log, not from a password.
+#   * Adding or removing someone is a PR against this file followed by a
+#     rerun of install.sh on each host. Nothing is edited on a host by hand.
+#
+# username	public key
+adam	ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMWqluFdepw8+aIYMcJs+6HAXnVEqPLcUMMK+ZtnEaY+ adam@cdpi staging admin
+cdpi-agent	ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPdLoIpQS+WKgA4cMHbQ3rMhjTSK7jQdHKBev4C63c/N adamndegwa@protonmail.com
