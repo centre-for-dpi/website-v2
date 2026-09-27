@@ -1,6 +1,5 @@
 <?php
 
-die("thi is index")
 
 get_header(); ?>
 

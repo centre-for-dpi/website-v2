@@ -4,8 +4,6 @@ get_header();
 // Initialize for a specific post type
 $postHandler = new CustomPost('video');
 
-$postHandler->set
-
 // Get complete post details
 $post = $postHandler->getListOfPosts(["meta_fields", "content"]);
 
