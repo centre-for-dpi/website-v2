@@ -1,0 +1,128 @@
+name: Release
+
+# Builds the container image once per merge to main (and once per release tag)
+# and publishes it to GHCR tagged with the full commit SHA (ADR-004). This
+# workflow never runs on pull_request: it needs `packages: write` and the
+# `build` environment, and nothing that runs for a pull request may see either.
+#
+# Deploy jobs (staging, then approval-gated production) are added to this
+# workflow in WP6 and WP8; they consume the `image_tag` output of `build`.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+
+# One release run per ref at a time, and never cancel one that is already
+# pushing: an interrupted push could leave a half-published image.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    # The `build` environment carries the deployment branch policy (main and
+    # v* only), so even a workflow file edited on another branch cannot push.
+    environment: build
+    timeout-minutes: 30
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+      skipped: ${{ steps.guard.outputs.skip }}
+    steps:
+      - name: Check out the commit being released
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # sha-<full 40-hex sha> on every run; plus the tag name on v* tags.
+          # No `latest`: every deploy names an exact tag (ADR-004).
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=ref,event=tag
+          flavor: |
+            latest=false
+
+      - name: Immutability guard
+        id: guard
+        # GHCR does not enforce tag immutability, so this job does: if the
+        # sha- tag already exists (a re-run, or a tag push for a commit that was
+        # already built from main) the image is not rebuilt or re-pushed.
+        # `docker manifest inspect` exits non-zero when the tag is absent.
+        env:
+          SHA_TAG: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if docker manifest inspect "$SHA_TAG" >/dev/null 2>&1; then
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            echo "::notice::$SHA_TAG already exists in GHCR; tags are immutable, so the build and push are skipped."
+          else
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+            echo "$SHA_TAG does not exist yet; building."
+          fi
+
+      - name: Build and push
+        if: steps.guard.outputs.skip != 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          # Attestations create extra untagged manifests that the retention
+          # workflow (WP7) would sweep; keep the push to the one image index.
+          provenance: false
+          sbom: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Record the image tag
+        id: tag
+        env:
+          TAG: sha-${{ github.sha }}
+        run: echo "image_tag=$TAG" >>"$GITHUB_OUTPUT"
+
+      - name: Summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          SKIPPED: ${{ steps.guard.outputs.skip }}
+        run: |
+          set -euo pipefail
+          if [ "$SKIPPED" = 'true' ]; then
+            echo "Skipped: image already published as $REGISTRY/$IMAGE_NAME:sha-$GITHUB_SHA"
+          else
+            echo "Pushed:"
+            printf '%s\n' "$TAGS" | sed 's/^/  /'
+          fi
+          {
+            echo "## Image"
+            echo
+            echo '```'
+            printf '%s\n' "$TAGS"
+            echo '```'
+            if [ "$SKIPPED" = 'true' ]; then echo "_(already existed; not rebuilt)_"; fi
+          } >>"$GITHUB_STEP_SUMMARY"
