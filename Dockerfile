@@ -153,10 +153,10 @@ RUN set -eux; \
 # normalised in their stages and COPY --from preserves that.
 COPY --chown=root:root --chmod=644 docker/wp-config.php /var/www/html/wp-config.php
 COPY --from=plugins /app/wp-content/plugins/ /var/www/html/wp-content/plugins/
-# wp-content-extra/mu-plugins/ is a placeholder until production's must-use
-# plugins are reviewed and committed (its README is excluded by .dockerignore,
-# so the directory arrives empty). Modes are normalised in the RUN below,
-# which is cheap while the directory is small.
+# wp-content-extra/mu-plugins/ holds the reviewed must-use plugins (today only
+# security-helper.php; its README is excluded by .dockerignore and never
+# reaches the image). Modes are normalised in the RUN below, which is cheap
+# while the directory is small.
 COPY --chown=root:root wp-content-extra/mu-plugins/ /var/www/html/wp-content/mu-plugins/
 COPY --from=theme /out/ /var/www/html/wp-content/themes/${THEME_SLUG}/
 
