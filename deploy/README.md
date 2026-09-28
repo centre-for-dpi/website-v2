@@ -167,57 +167,36 @@ alternative; it needs swarm semantics that plain `compose up` ignores.
 
 ---
 
-## CI additions for the supervisor to make in WP6
+## How deploys are triggered (`.github/workflows/release.yml`)
 
-`.github/workflows/ci.yml` is owned by another work package, so these are not
-applied here. Add to the `lint` job (or a new `deploy-lint` job), on
-`pull_request` and `push: main`, with `permissions: contents: read` and no
-secrets:
+Nothing on a host polls anything. A deploy happens only when a GitHub Actions
+job, bound to the `staging` or `production` environment, opens one SSH session
+to the host and sends `deploy <tag>`:
 
-```yaml
-      - name: shellcheck
-        run: |
-          docker run --rm -v "$PWD":/w -w /w koalaman/shellcheck:stable \
-            deploy/host/cdpi-deploy \
-            deploy/host/cdpi-deploy-root \
-            deploy/host/cdpi-breakglass-notify \
-            deploy/host/install.sh \
-            deploy/host/test-cdpi-deploy.sh \
-            $(git ls-files 'scripts/**/*.sh')
+| Trigger | What runs | Tag deployed |
+|---|---|---|
+| merge to `main` (push) | `build` publishes `sha-<sha>` to GHCR, then `deploy-staging` | the tag `build` just produced |
+| `gh workflow run release.yml -f image_tag=<tag> -f environment=staging` | `validate`, then `deploy-staging` | the tag you named (rollback or redeploy) |
+| `gh workflow run release.yml -f image_tag=<tag> -f environment=production` | `validate`, then `deploy-production` after a required reviewer approves | the tag you named |
 
-      - name: deploy wrapper parser self-test
-        run: ./deploy/host/test-cdpi-deploy.sh
+Production is never reached from a push, and the `deploy-production` job is
+skipped until the repository variable `PRODUCTION_DEPLOYS_ENABLED` is `true`
+(set at cutover, runbook 04).
 
-      - name: compose config (all three overlays)
-        run: |
-          export CDPI_ETC="$RUNNER_TEMP/etc-cdpi"
-          mkdir -p "$CDPI_ETC"
-          cp deploy/app.env.example   "$CDPI_ETC/app.env"
-          cp deploy/caddy.env.example "$CDPI_ETC/caddy.env"
-          cp deploy/db.env.example    "$CDPI_ETC/db.env"
-          export IMAGE_TAG=sha-0000000000000000000000000000000000000000
-          cd deploy
-          docker compose -f compose.yaml -f compose.staging.yaml    config >/dev/null
-          docker compose -f compose.yaml -f compose.production.yaml config >/dev/null
-          docker compose -f compose.yaml -f compose.production.yaml -f compose.shadow.yaml config >/dev/null
-          test "$(docker compose -f compose.yaml -f compose.production.yaml -f compose.shadow.yaml config --services)" = wordpress
+Both deploy jobs call the composite action `.github/actions/remote-deploy`:
+it writes the environment's `DEPLOY_SSH_KEY` to a 0600 file, pins the host
+key from `DEPLOY_KNOWN_HOSTS` (`StrictHostKeyChecking=yes`), runs
+`ssh deploy@DEPLOY_HOST deploy <tag>` and streams the host's log, then fetches
+`SITE_URL/` from the runner (up to 10 tries, 6 s apart, connection pinned to
+`DEPLOY_HOST` so a CDN cannot answer, `--cacert SMOKE_CA_CERT` when set) until
+it sees HTTP 200 and `<meta name="cdpi-build" content="<sha>">`. The host-side
+script has already done its own smoke and automatic rollback by then; the
+runner's check is the outside view. What each environment must define is in
+runbook 02 §6 (staging) and 03 §8 (production).
 
-      - name: caddy validate (both TLS modes)
-        run: |
-          CADDY=caddy:2.11.4
-          docker run --rm -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
-            -e SITE_HOST=localhost -e CADDY_TLS=internal -e CADDY_ENV=staging \
-            $CADDY caddy validate --config /etc/caddy/Caddyfile
-          docker run --rm -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
-            -e SITE_HOST=cdpi.dev \
-            $CADDY caddy validate --config /etc/caddy/Caddyfile
-          docker run --rm -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
-            $CADDY caddy fmt --diff /etc/caddy/Caddyfile
-```
-
-The `caddy:2.11.4` and `mysql:8.4.11` tags in the compose files, and the
-`caddy:2.11.4` above, should move together. Consider adding `deploy/**` to the
-Dependabot `docker` ecosystem so the pins get PRs.
+The static checks over this directory (shellcheck, the wrapper self-test,
+`compose config`, `caddy validate`) run on every pull request in the
+`deploy-tooling` job of `.github/workflows/ci.yml`.
 
 ---
 
