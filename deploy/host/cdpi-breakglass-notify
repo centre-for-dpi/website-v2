@@ -1,0 +1,73 @@
+#!/bin/bash
+# cdpi-breakglass-notify — pam_exec hook that raises an alert whenever the
+# shared provider key pair is used to log in.
+#
+# Installed at /usr/local/sbin/cdpi-breakglass-notify, mode 0750, root:root,
+# and wired up by install.sh --seal-default-user with this line in
+# /etc/pam.d/sshd:
+#
+#   session optional pam_exec.so seteuid /usr/local/sbin/cdpi-breakglass-notify
+#
+# `optional` is deliberate: if this script is broken or slow, break-glass
+# access must still work. That is the point of break-glass.
+#
+# PAM passes context in the environment: PAM_USER, PAM_RHOST, PAM_TYPE,
+# PAM_SERVICE. We act only on a session being opened by a member of the
+# `breakglass` group, so ordinary named logins produce nothing.
+set -uo pipefail
+
+: "${PAM_USER:=}"
+: "${PAM_TYPE:=}"
+: "${PAM_RHOST:=}"
+: "${PAM_SERVICE:=}"
+
+[[ $PAM_TYPE == open_session ]] || exit 0
+[[ -n $PAM_USER ]] || exit 0
+
+# Is this user break-glass? `id -nG` covers both the primary and supplementary
+# groups. Anything unexpected here means "not break-glass", so exit quietly.
+if ! id -nG "$PAM_USER" 2>/dev/null | tr ' ' '\n' | grep -qx breakglass; then
+	exit 0
+fi
+
+host=$(hostname -f 2>/dev/null || hostname)
+env_name=unknown
+if [[ -r /etc/cdpi/deploy.env ]]; then
+	# Subshell: deploy.env must not leak into this script's namespace.
+	env_name=$(
+		set -a
+		# shellcheck source=/dev/null
+		. /etc/cdpi/deploy.env
+		set +a
+		printf '%s' "${ENV:-unknown}"
+	)
+fi
+
+msg="BREAK-GLASS LOGIN on ${host} (env=${env_name}): user=${PAM_USER} from=${PAM_RHOST:-unknown} service=${PAM_SERVICE:-unknown} at $(date -u '+%Y-%m-%dT%H:%M:%SZ'). The shared provider key pair was used. A BREAKGLASS.md entry is required within 24 hours."
+
+# Always land in the journal and auth.log, whatever else happens.
+logger -t BREAKGLASS -p auth.warning -- "$msg" 2>/dev/null || true
+
+# Optional out-of-band notification. The command comes from root-owned
+# /etc/cdpi/deploy.env and receives the message on stdin.
+notify_cmd=
+if [[ -r /etc/cdpi/deploy.env ]]; then
+	notify_cmd=$(
+		set -a
+		# shellcheck source=/dev/null
+		. /etc/cdpi/deploy.env
+		set +a
+		printf '%s' "${BREAKGLASS_NOTIFY_CMD:-}"
+	)
+fi
+
+if [[ -n $notify_cmd ]]; then
+	# Backgrounded and time-boxed: a hanging webhook must never hold up a
+	# break-glass login.
+	(
+		printf '%s\n' "$msg" | timeout 10 bash -c "$notify_cmd" >/dev/null 2>&1 ||
+			logger -t BREAKGLASS -p auth.warning -- "notification command failed" 2>/dev/null || true
+	) &
+fi
+
+exit 0

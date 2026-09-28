@@ -1,0 +1,58 @@
+# CDPI website — reverse proxy in front of the WordPress container.
+#
+# One Caddyfile serves both environments. Three environment variables,
+# supplied by /etc/cdpi/caddy.env (see caddy.env.example), select behaviour:
+#
+#   SITE_HOST   the site address: a hostname on production, or the staging
+#               Elastic IP in IP-only mode.
+#   CADDY_TLS   "internal" -> Caddy's local CA (staging IP-only mode)
+#               ""/unset   -> automatic public certificates (production)
+#   CADDY_ENV   "staging"    -> X-Robots-Tag: noindex, nofollow
+#               "production" -> no robots header (the default)
+#
+# Mechanism: {$VAR} is substituted textually before the Caddyfile is
+# parsed, so the value can select which snippet is imported. That is how a
+# conditional `tls internal` is expressed without a second Caddyfile and
+# without ever emitting an empty `tls` directive (which is a parse error)
+# or an empty X-Robots-Tag header. An unexpected value fails loudly at
+# startup with "import: no snippet named tls_<value>", which is the
+# intended behaviour: a typo must not silently publish staging to search
+# engines or silently skip TLS.
+
+(tls_internal) {
+	# Staging, IP-only mode. Admins and the pipeline trust the root that
+	# install.sh / the bootstrap runbook exports to /opt/cdpi/caddy-root.crt.
+	tls internal
+}
+
+(tls_) {
+	# Production. No tls directive: Caddy's automatic HTTPS obtains and
+	# renews a public certificate for SITE_HOST over HTTP-01/TLS-ALPN.
+	# Deliberately empty.
+}
+
+(robots_staging) {
+	header X-Robots-Tag "noindex, nofollow"
+}
+
+(robots_production) {
+	# Production is indexable. Deliberately empty.
+}
+
+{$SITE_HOST} {
+	import tls_{$CADDY_TLS:}
+	import robots_{$CADDY_ENV:production}
+
+	encode zstd gzip
+
+	# WordPress media uploads; keep in step with upload_max_filesize /
+	# post_max_size in the image's php.ini.
+	request_body {
+		max_size 64MB
+	}
+
+	# Do not advertise the proxy.
+	header -Server
+
+	reverse_proxy wordpress:80
+}

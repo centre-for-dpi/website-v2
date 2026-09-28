@@ -1,0 +1,633 @@
+#!/bin/bash
+# cdpi-deploy-root — privileged half of the CDPI deploy tooling.
+#
+# Installed at /usr/local/sbin/cdpi-deploy-root, mode 0750, root:root.
+# Reached only through `sudo -n` from /usr/local/bin/cdpi-deploy (the sshd
+# ForceCommand wrapper), which has already validated the arguments; every
+# argument is re-validated here so a mistake in sudoers cannot widen it.
+#
+# Usage:
+#   cdpi-deploy-root status
+#   cdpi-deploy-root deploy <sha-[0-9a-f]{40}|vX.Y.Z>
+#   cdpi-deploy-root rollback
+#   cdpi-deploy-root --dry-run deploy <tag>     # print, execute nothing
+#
+# Deploy order (ADR-007): backup -> pull -> migrate -> swap (renewing the
+# anonymous /var/www/html volume) -> smoke -> (on failure) roll back to the
+# previous tag -> prune images and the anonymous volume left by the swap.
+#
+# Environment overrides, for testing only (defaults are the host paths):
+#   CDPI_DRY_RUN=1        same as --dry-run
+#   CDPI_ETC              default /etc/cdpi
+#   CDPI_STATE_DIR        default /var/lib/cdpi
+#   CDPI_LOG_FILE         default /var/log/cdpi-deploy.log
+#   CDPI_LOCK_FILE        default /run/lock/cdpi-deploy.lock
+#   CDPI_IMAGE_REPO       default ghcr.io/centre-for-dpi/website-v2
+#   CDPI_UPLOADS_VOLUME   default cdpi_uploads
+#   CDPI_SMOKE_ANY=1      accept HTTP 200 without checking the build marker.
+#                         Only for bringing the stack up with a placeholder
+#                         image; never set this on a real host.
+#   CDPI_SKIP_REGISTRY_LOGIN=1
+#                         skip `docker login ghcr.io` and, because a pull
+#                         cannot succeed without it, the pull as well; the
+#                         tag must already exist locally (checked). Only for
+#                         exercising this script against a locally tagged
+#                         placeholder image; never set this on a real host.
+set -euo pipefail
+
+TAG_RE='^(sha-[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+)$'
+
+CDPI_ETC=${CDPI_ETC:-/etc/cdpi}
+STATE_DIR=${CDPI_STATE_DIR:-/var/lib/cdpi}
+LOG_FILE=${CDPI_LOG_FILE:-/var/log/cdpi-deploy.log}
+LOCK_FILE=${CDPI_LOCK_FILE:-/run/lock/cdpi-deploy.lock}
+IMAGE_REPO=${CDPI_IMAGE_REPO:-ghcr.io/centre-for-dpi/website-v2}
+UPLOADS_VOLUME=${CDPI_UPLOADS_VOLUME:-cdpi_uploads}
+DRY=${CDPI_DRY_RUN:-0}
+
+CURRENT_TAG_FILE=$STATE_DIR/current_tag
+PREVIOUS_TAG_FILE=$STATE_DIR/previous_tag
+
+DOCKER_CONFIG_TMP=
+
+# ---------------------------------------------------------------------------
+# plumbing
+# ---------------------------------------------------------------------------
+
+log() {
+	local msg="$*" line
+	line="$(date -u '+%Y-%m-%dT%H:%M:%SZ') cdpi-deploy[$$] $msg"
+	printf '%s\n' "$line"
+	logger -t cdpi-deploy -- "$msg" 2>/dev/null || true
+	printf '%s\n' "$line" >>"$LOG_FILE" 2>/dev/null || true
+}
+
+die() {
+	log "ERROR: $*"
+	exit 1
+}
+
+# Execute an argv, or print it under --dry-run.
+run() {
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: $*"
+		return 0
+	fi
+	log "+ $*"
+	"$@"
+}
+
+# Execute a shell string (needed for the dump|gzip pipelines and for the
+# IMAGE_TAG=... prefixes), or print it under --dry-run. The strings are built
+# from root-owned /etc/cdpi config, never from anything a client sends.
+run_sh() {
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: sh -c: $1"
+		return 0
+	fi
+	log "+ sh -c: $1"
+	bash -o pipefail -c "$1"
+}
+
+cleanup() {
+	if [[ -n $DOCKER_CONFIG_TMP && -d $DOCKER_CONFIG_TMP ]]; then
+		rm -rf -- "$DOCKER_CONFIG_TMP"
+	fi
+}
+trap cleanup EXIT
+
+read_state() {
+	if [[ -r $1 ]]; then
+		tr -d '[:space:]' <"$1"
+	fi
+}
+
+write_state() {
+	local file=$1 value=$2
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: write '$value' to $file"
+		return 0
+	fi
+	printf '%s\n' "$value" >"$file.tmp"
+	chmod 0600 "$file.tmp"
+	mv -f "$file.tmp" "$file"
+	log "state: $(basename "$file")=$value"
+}
+
+# ---------------------------------------------------------------------------
+# argument parsing
+# ---------------------------------------------------------------------------
+
+positional=()
+for arg in "$@"; do
+	case $arg in
+	--dry-run) DRY=1 ;;
+	-h | --help)
+		# The header comment, up to the first non-comment line.
+		awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0"
+		exit 0
+		;;
+	*) positional+=("$arg") ;;
+	esac
+done
+set -- ${positional[@]+"${positional[@]}"}
+
+ACTION=${1:-}
+TAG=${2:-}
+
+case $ACTION in
+status | rollback)
+	[[ -z $TAG ]] || die "$ACTION takes no tag"
+	;;
+deploy)
+	[[ $TAG =~ $TAG_RE ]] || die "invalid image tag: '$TAG'"
+	;;
+*)
+	die "usage: cdpi-deploy-root [--dry-run] status|deploy <tag>|rollback"
+	;;
+esac
+
+# ---------------------------------------------------------------------------
+# configuration
+# ---------------------------------------------------------------------------
+
+[[ -r $CDPI_ETC/deploy.env ]] || die "missing or unreadable $CDPI_ETC/deploy.env"
+set -a
+# shellcheck source=/dev/null
+. "$CDPI_ETC/deploy.env"
+set +a
+
+: "${ENV:=unknown}"
+: "${COMPOSE_DIR:=/opt/cdpi}"
+: "${COMPOSE_FILES:=compose.yaml}"
+: "${BACKUP_DIR:=/var/backups/cdpi}"
+: "${DB_MODE:=container}"
+: "${MYSQL_DEFAULTS_FILE:=$CDPI_ETC/my.cnf}"
+: "${KEEP_IMAGES:=3}"
+: "${KEEP_BACKUPS:=5}"
+: "${SMOKE_CA_CERT:=}"
+[[ -n ${SITE_HOST:-} ]] || die "SITE_HOST is not set in $CDPI_ETC/deploy.env"
+[[ $DB_MODE == host || $DB_MODE == container ]] || die "DB_MODE must be host or container"
+
+read -r -a _compose_files <<<"$COMPOSE_FILES"
+DC=(docker compose --project-directory "$COMPOSE_DIR" --env-file "$COMPOSE_DIR/.env")
+for _f in "${_compose_files[@]}"; do
+	DC+=(-f "$COMPOSE_DIR/$_f")
+done
+DC_STR="${DC[*]}"
+
+# Read one key out of app.env without letting it into this shell's namespace.
+app_env_get() {
+	local key=$1
+	(
+		set -a
+		# shellcheck source=/dev/null
+		. "$CDPI_ETC/app.env"
+		set +a
+		printf '%s' "${!key-}"
+	)
+}
+
+ensure_dirs() {
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: ensure $STATE_DIR, $BACKUP_DIR, $COMPOSE_DIR/.env, $LOG_FILE"
+		return 0
+	fi
+	install -d -m 0700 "$STATE_DIR" "$BACKUP_DIR"
+	[[ -e $COMPOSE_DIR/.env ]] || : >"$COMPOSE_DIR/.env"
+	[[ -e $LOG_FILE ]] || : >"$LOG_FILE"
+	chmod 0640 "$LOG_FILE"
+}
+
+acquire_lock() {
+	mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
+	exec 9>"$LOCK_FILE"
+	flock -n 9 || die "another cdpi-deploy is already running (lock $LOCK_FILE)"
+}
+
+# ---------------------------------------------------------------------------
+# backup
+# ---------------------------------------------------------------------------
+
+wait_db_healthy() {
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: wait for the db service to report healthy"
+		return 0
+	fi
+	local i cid state
+	for i in $(seq 1 30); do
+		cid=$("${DC[@]}" ps -q db 2>/dev/null || true)
+		if [[ -n $cid ]]; then
+			state=$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo unknown)
+			if [[ $state == healthy ]]; then
+				log "db: healthy after ${i} checks"
+				return 0
+			fi
+		fi
+		sleep 2
+	done
+	die "db did not become healthy within 60s"
+}
+
+backup_db() {
+	local ts=$1 dbname
+	local out="$BACKUP_DIR/db-$ts.sql.gz"
+	if [[ $DB_MODE == host ]]; then
+		dbname=$(app_env_get WORDPRESS_DB_NAME)
+		[[ -n $dbname ]] || die "WORDPRESS_DB_NAME not found in $CDPI_ETC/app.env"
+		if [[ $DRY != 1 ]]; then
+			[[ -r $MYSQL_DEFAULTS_FILE ]] || die "missing $MYSQL_DEFAULTS_FILE (DB_MODE=host)"
+		fi
+		log "backup: host mysqldump of '$dbname' -> $out"
+		run_sh "mysqldump --defaults-extra-file='$MYSQL_DEFAULTS_FILE' --single-transaction --quick --routines --triggers '$dbname' | gzip -c >'$out.part' && mv -f '$out.part' '$out'"
+	else
+		log "backup: container mysqldump -> $out"
+		run_sh "$DC_STR up -d db"
+		wait_db_healthy
+		# Credentials stay inside the container; nothing appears in the host
+		# process list or in this script's arguments.
+		run_sh "$DC_STR exec -T db sh -c 'exec mysqldump --single-transaction --quick --routines --triggers -uroot -p\"\$MYSQL_ROOT_PASSWORD\" \"\$MYSQL_DATABASE\"' | gzip -c >'$out.part' && mv -f '$out.part' '$out'"
+	fi
+}
+
+backup_uploads() {
+	local ts=$1 mp rs=()
+	local dest="$BACKUP_DIR/uploads-$ts"
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: rsync -a --delete --link-dest=$BACKUP_DIR/uploads-latest <mountpoint of volume $UPLOADS_VOLUME>/ $dest/"
+		log "DRY-RUN: ln -sfn $dest $BACKUP_DIR/uploads-latest"
+		return 0
+	fi
+	mp=$(docker volume inspect -f '{{.Mountpoint}}' "$UPLOADS_VOLUME" 2>/dev/null || true)
+	if [[ -z $mp || ! -d $mp ]]; then
+		log "backup: volume $UPLOADS_VOLUME does not exist yet, skipping uploads snapshot"
+		return 0
+	fi
+	rs=(rsync -a --delete)
+	# Unchanged files become hard links to the previous snapshot, so N
+	# snapshots cost roughly one copy of the uploads directory.
+	[[ -d $BACKUP_DIR/uploads-latest ]] && rs+=(--link-dest="$BACKUP_DIR/uploads-latest")
+	rs+=("$mp/" "$dest/")
+	run "${rs[@]}"
+	run ln -sfn "$dest" "$BACKUP_DIR/uploads-latest"
+}
+
+prune_backups() {
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: keep the newest $KEEP_BACKUPS dumps and uploads snapshots in $BACKUP_DIR, delete older"
+		return 0
+	fi
+	local f
+	while IFS= read -r f; do
+		[[ -n $f ]] || continue
+		log "backup: removing old dump $f"
+		rm -f -- "$f"
+	done < <(find "$BACKUP_DIR" -maxdepth 1 -name 'db-*.sql.gz' -printf '%T@ %p\n' 2>/dev/null |
+		sort -rn | tail -n "+$((KEEP_BACKUPS + 1))" | cut -d' ' -f2-)
+	while IFS= read -r f; do
+		[[ -n $f ]] || continue
+		log "backup: removing old uploads snapshot $f"
+		rm -rf -- "$f"
+	done < <(find "$BACKUP_DIR" -maxdepth 1 -type d -name 'uploads-2*' -printf '%T@ %p\n' 2>/dev/null |
+		sort -rn | tail -n "+$((KEEP_BACKUPS + 1))" | cut -d' ' -f2-)
+}
+
+# ---------------------------------------------------------------------------
+# registry
+# ---------------------------------------------------------------------------
+
+registry_login() {
+	[[ -r $CDPI_ETC/registry.env ]] || die "missing or unreadable $CDPI_ETC/registry.env"
+	DOCKER_CONFIG_TMP=$(mktemp -d)
+	export DOCKER_CONFIG=$DOCKER_CONFIG_TMP
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: docker login ghcr.io -u \$GHCR_USER --password-stdin <<< \$GHCR_TOKEN (from $CDPI_ETC/registry.env, DOCKER_CONFIG=$DOCKER_CONFIG_TMP, removed on exit)"
+		return 0
+	fi
+	log "registry: docker login ghcr.io using an ephemeral DOCKER_CONFIG"
+	(
+		set -a
+		# shellcheck source=/dev/null
+		. "$CDPI_ETC/registry.env"
+		set +a
+		[[ -n ${GHCR_USER:-} && -n ${GHCR_TOKEN:-} ]] ||
+			die "GHCR_USER/GHCR_TOKEN missing from $CDPI_ETC/registry.env"
+		printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null
+	) || die "docker login to ghcr.io failed"
+}
+
+# ---------------------------------------------------------------------------
+# smoke check
+# ---------------------------------------------------------------------------
+
+# smoke <tag> — HTTP 200 plus the build marker, 12 attempts 5s apart.
+# --resolve pins the connection to this host, so a CDN in front of the site
+# cannot answer with a cached page.
+smoke() {
+	local want=$1 attempt out code body marker ca=() expect
+	if [[ $want == sha-* ]]; then
+		expect="<meta name=\"cdpi-build\" content=\"${want#sha-}\">"
+	else
+		expect="<meta name=\"cdpi-build\" content=\"<any 40-hex commit sha>\"> (release tag $want)"
+	fi
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: up to 12 attempts, 5s apart: curl -sS --max-time 20 --resolve $SITE_HOST:443:127.0.0.1 ${SMOKE_CA_CERT:+--cacert $SMOKE_CA_CERT} https://$SITE_HOST/ expecting HTTP 200 and $expect"
+		return 0
+	fi
+	[[ -n $SMOKE_CA_CERT ]] && ca=(--cacert "$SMOKE_CA_CERT")
+	for attempt in $(seq 1 12); do
+		out=$(curl -sS --max-time 20 --resolve "$SITE_HOST:443:127.0.0.1" \
+			${ca[@]+"${ca[@]}"} -w $'\n%{http_code}' "https://$SITE_HOST/" 2>&1) ||
+			out="$out"$'\n''000'
+		code=${out##*$'\n'}
+		body=${out%$'\n'*}
+
+		if [[ $code != 200 ]]; then
+			log "smoke: attempt $attempt/12 HTTP ${code:-?}"
+			sleep 5
+			continue
+		fi
+
+		marker=$(grep -o -m1 'name="cdpi-build" content="[0-9a-f]\{40\}"' <<<"$body" |
+			grep -o '[0-9a-f]\{40\}' || true)
+
+		if [[ ${CDPI_SMOKE_ANY:-0} == 1 ]]; then
+			log "smoke: HTTP 200; marker='${marker:-none}' (CDPI_SMOKE_ANY=1, marker not enforced)"
+			return 0
+		fi
+
+		if [[ $want == sha-* ]]; then
+			if [[ $marker == "${want#sha-}" ]]; then
+				log "smoke: OK, HTTP 200 and marker $marker"
+				return 0
+			fi
+			log "smoke: attempt $attempt/12 HTTP 200 but marker='${marker:-none}', wanted ${want#sha-}"
+		else
+			# A v* tag is a release of some commit; the marker is that
+			# commit's SHA, which we cannot derive from the tag. Accept any
+			# 40-hex marker and record which commit answered.
+			if [[ -n $marker ]]; then
+				log "smoke: OK, HTTP 200 and release $want is serving commit $marker"
+				return 0
+			fi
+			log "smoke: attempt $attempt/12 HTTP 200 but no cdpi-build marker in the response"
+		fi
+		sleep 5
+	done
+	return 1
+}
+
+# ---------------------------------------------------------------------------
+# image housekeeping
+# ---------------------------------------------------------------------------
+
+prune_images() {
+	local cur=$1 prev=$2
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: keep $IMAGE_REPO:$cur${prev:+, $IMAGE_REPO:$prev} and the newest KEEP_IMAGES=$KEEP_IMAGES tags of $IMAGE_REPO; docker image rm the rest; docker image prune -f"
+		return 0
+	fi
+	local keep=() all=() ref i=0
+	[[ -n $cur ]] && keep+=("$IMAGE_REPO:$cur")
+	[[ -n $prev ]] && keep+=("$IMAGE_REPO:$prev")
+	# docker images lists newest-created first.
+	mapfile -t all < <(docker images --format '{{.Repository}}:{{.Tag}}' "$IMAGE_REPO" 2>/dev/null |
+		grep -v ':<none>$' || true)
+	for ref in ${all[@]+"${all[@]}"}; do
+		((i < KEEP_IMAGES)) && keep+=("$ref")
+		i=$((i + 1))
+	done
+	for ref in ${all[@]+"${all[@]}"}; do
+		if printf '%s\n' ${keep[@]+"${keep[@]}"} | grep -Fxq -- "$ref"; then
+			continue
+		fi
+		log "prune: docker image rm $ref"
+		docker image rm -- "$ref" >/dev/null 2>&1 || log "prune: could not remove $ref (still in use?)"
+	done
+	docker image prune -f >/dev/null 2>&1 || true
+	log "prune: dangling images removed"
+}
+
+# prune_volumes — remove the anonymous volume the replaced wordpress container
+# left behind (see the comment above the swap step in deploy_tag; `up -d -V`
+# creates a fresh one and leaves the old one dangling).
+#
+# `docker volume prune` WITHOUT --all removes only anonymous volumes that no
+# container references. That is the behaviour of Docker Engine >= 23.0 (API
+# 1.42, Feb 2023): the engine labels every anonymous volume
+# `com.docker.volume.anonymous`, the default prune is limited to those, and
+# `--all` is what it takes to touch a named volume. On an older engine the
+# default prune removed EVERY unreferenced volume, named ones included -- and
+# under compose.shadow.yaml cdpi_caddy_data is unreferenced, because caddy is
+# parked. The explicit label filter closes that gap: an old engine sets no
+# such label, so nothing matches and the call is a no-op; on a current engine
+# it is redundant with the default. Either way the named volumes cdpi_uploads,
+# cdpi_db_data, cdpi_caddy_data and cdpi_caddy_config are never candidates.
+prune_volumes() {
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: docker volume prune -f --filter label=com.docker.volume.anonymous (anonymous, unreferenced volumes only; named volumes are never touched)"
+		return 0
+	fi
+	local out n
+	if ! out=$(docker volume prune -f --filter label=com.docker.volume.anonymous 2>&1); then
+		log "prune: docker volume prune failed (not fatal): ${out//$'\n'/ }"
+		return 0
+	fi
+	n=$(grep -cE '^[0-9a-f]{64}$' <<<"$out" || true)
+	log "prune: $n anonymous volume(s) removed; $(grep -o 'Total reclaimed space:.*' <<<"$out" || echo 'nothing reclaimed')"
+}
+
+# ---------------------------------------------------------------------------
+# actions
+# ---------------------------------------------------------------------------
+
+write_env_tag() {
+	local t=$1 f="$COMPOSE_DIR/.env"
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: write IMAGE_TAG=$t to $f"
+		return 0
+	fi
+	printf 'IMAGE_TAG=%s\n' "$t" >"$f.tmp"
+	chmod 0644 "$f.tmp"
+	mv -f "$f.tmp" "$f"
+	log "compose: $f now pins IMAGE_TAG=$t"
+}
+
+migrate() {
+	local extra=
+	if [[ $DB_MODE == container ]]; then
+		run_sh "$DC_STR up -d db"
+		wait_db_healthy
+	else
+		# Nothing else to start: the database is on the host.
+		extra=--no-deps
+	fi
+	# `run --rm` removes the one-off container together with its anonymous
+	# volumes when it exits (the base image's VOLUME /var/www/html makes one
+	# per container; see the swap step), so this leaves nothing behind.
+	# Verified with compose v5.5.1: `docker volume ls` is identical before
+	# and after. `run` also never touches the running wordpress container.
+	run_sh "IMAGE_TAG='$IMAGE_TAG' $DC_STR run --rm $extra --user www-data wordpress wp core update-db"
+}
+
+action_status() {
+	local cur prev
+	cur=$(read_state "$CURRENT_TAG_FILE")
+	prev=$(read_state "$PREVIOUS_TAG_FILE")
+	echo "env:          $ENV"
+	echo "site:         https://$SITE_HOST/"
+	echo "db_mode:      $DB_MODE"
+	echo "current_tag:  ${cur:-<none>}"
+	echo "previous_tag: ${prev:-<none>}"
+	echo
+	echo "--- docker compose ps ---"
+	IMAGE_TAG=${cur:-unset} "${DC[@]}" ps 2>&1 || true
+	echo
+	echo "--- disk ---"
+	df -h "$COMPOSE_DIR" "$BACKUP_DIR" /var/lib/docker 2>/dev/null || df -h /
+	echo
+	echo "--- last 5 lines of $LOG_FILE ---"
+	tail -n 5 "$LOG_FILE" 2>/dev/null || echo "(no log yet)"
+}
+
+# The `up -d` that (re)creates the wordpress container. Always with -V:
+#
+#   The official wordpress:*-apache base image declares VOLUME /var/www/html.
+#   Our image bakes the whole site into that path at build time, but the
+#   VOLUME declaration makes Docker mount an ANONYMOUS VOLUME there on the
+#   container's first start, seeded from the image's files. When compose
+#   recreates the container for a new tag it re-attaches that SAME anonymous
+#   volume (that is what "retrieving data from the previous container" in
+#   `up --help` means), so a plain `up -d` -- or `--force-recreate` -- keeps
+#   serving the OLD docroot from the old volume; only ENV changes. The
+#   cdpi-build smoke marker comes from an ENV var, not from a file, so it
+#   cannot catch this. --renew-anon-volumes (-V) makes compose create a
+#   fresh anonymous volume seeded from the NEW image, which is the only
+#   thing that makes a redeploy actually ship the new files. Proven in
+#   PR #5 "Review fix 2": a file planted in /var/www/html survived
+#   --force-recreate on the same volume id and was gone only with -V.
+#   NEVER remove the flag. The old volume is left dangling and is removed
+#   by prune_volumes once the new container has passed the smoke check.
+#
+#   -V also implies --force-recreate for every service the `up` selects
+#   (verified with compose v5.5.1: an unscoped `up -d -V` recreated db and
+#   caddy too, config unchanged), which would restart MySQL on every staging
+#   deploy. So the swap is two commands: -V scoped to the wordpress service
+#   alone (--no-deps: db is already up and healthy from the migration step,
+#   or lives on the host), then a plain `up -d` that starts anything not yet
+#   running (caddy on a first deploy) and recreates nothing whose config is
+#   unchanged. Caddy resolves `wordpress` per request, so it needs no restart.
+#
+#   The named uploads volume is unaffected: it is mounted on top at
+#   wp-content/uploads, is never anonymous, and is never pruned.
+swap_containers() {
+	run_sh "$DC_STR up -d --no-build --no-deps --renew-anon-volumes wordpress"
+	run_sh "$DC_STR up -d --no-build --remove-orphans"
+}
+
+# deploy_tag <tag> — the whole ten-step sequence. `rollback` reuses it,
+# which is what makes rollback the same code path as a deploy.
+deploy_tag() {
+	local tag=$1 ts cur prev
+	[[ $tag =~ $TAG_RE ]] || die "invalid image tag: '$tag'"
+	export IMAGE_TAG=$tag
+
+	log "=== START env=$ENV action=$ACTION tag=$tag db_mode=$DB_MODE dry_run=$DRY ==="
+	ensure_dirs
+	ts=$(date -u '+%Y%m%dT%H%M%SZ')
+
+	log "step 1/10 backup (timestamp $ts)"
+	backup_db "$ts"
+	backup_uploads "$ts"
+	prune_backups
+
+	log "step 2/10 registry login and image pull"
+	if [[ ${CDPI_SKIP_REGISTRY_LOGIN:-0} == 1 ]]; then
+		# Test-only override, see the header. No login, hence no pull.
+		log "TEST-ONLY: CDPI_SKIP_REGISTRY_LOGIN=1, skipping docker login and pull; using local image $IMAGE_REPO:$tag"
+		if [[ $DRY != 1 ]]; then
+			docker image inspect "$IMAGE_REPO:$tag" >/dev/null 2>&1 ||
+				die "CDPI_SKIP_REGISTRY_LOGIN=1 but $IMAGE_REPO:$tag is not present locally"
+		fi
+	else
+		registry_login
+		run_sh "IMAGE_TAG='$tag' timeout 600 $DC_STR pull wordpress"
+	fi
+
+	log "step 3/10 record the tag we are replacing"
+	cur=$(read_state "$CURRENT_TAG_FILE")
+	prev=$cur
+	if [[ -n $cur ]]; then
+		write_state "$PREVIOUS_TAG_FILE" "$cur"
+	else
+		log "state: no current_tag yet, this is the first deploy on this host"
+	fi
+
+	log "step 4/10 pin the new tag"
+	write_env_tag "$tag"
+
+	log "step 5/10 database migration (wp core update-db)"
+	migrate
+
+	log "step 6/10 container swap (renewing the anonymous /var/www/html volume)"
+	swap_containers
+
+	log "step 7/10 smoke check"
+	if smoke "$tag"; then
+		log "step 9/10 record success and prune images"
+		write_state "$CURRENT_TAG_FILE" "$tag"
+		prune_images "$tag" "$prev"
+		log "step 10/10 prune the anonymous volume left by the swap"
+		prune_volumes
+		log "=== DEPLOY OK env=$ENV tag=$tag ==="
+		return 0
+	fi
+
+	log "step 8/10 smoke check FAILED for $tag"
+	if [[ -z $prev ]]; then
+		log "=== DEPLOY FAILED, NO PREVIOUS TAG TO ROLL BACK TO ==="
+		return 1
+	fi
+	log "step 8/10 restoring previous tag $prev (renewing the anonymous /var/www/html volume)"
+	write_env_tag "$prev"
+	swap_containers
+	if smoke "$prev"; then
+		# previous_tag is deliberately left at $prev rather than set to the
+		# bad tag, so a later `rollback` can never redeploy a tag that has
+		# just been proven broken.
+		write_state "$CURRENT_TAG_FILE" "$prev"
+		log "step 10/10 prune the anonymous volumes left by the swap and the rollback"
+		prune_volumes
+		log "=== DEPLOY FAILED, ROLLED BACK TO $prev ==="
+		return 1
+	fi
+	log "=== DEPLOY FAILED, ROLLBACK ALSO FAILED (wanted $prev) ==="
+	return 1
+}
+
+action_rollback() {
+	local prev cur
+	prev=$(read_state "$PREVIOUS_TAG_FILE")
+	cur=$(read_state "$CURRENT_TAG_FILE")
+	[[ -n $prev ]] || die "no previous_tag recorded in $PREVIOUS_TAG_FILE, nothing to roll back to"
+	if [[ $prev == "$cur" ]]; then
+		log "rollback: current and previous are both $prev; redeploying it is a no-op but harmless"
+	fi
+	log "rollback requested: ${cur:-<none>} -> $prev"
+	deploy_tag "$prev"
+}
+
+case $ACTION in
+status)
+	# Deliberately unlocked: status must answer while a deploy is running.
+	action_status
+	;;
+deploy)
+	acquire_lock
+	deploy_tag "$TAG"
+	;;
+rollback)
+	acquire_lock
+	action_rollback
+	;;
+esac
