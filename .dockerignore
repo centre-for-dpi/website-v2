@@ -1,0 +1,26 @@
+# Build context for the Dockerfile. Everything listed here never reaches the
+# builder, so it can neither leak into the image nor invalidate the build
+# cache. The theme stage takes only package*.json, .nvmrc, webpack.config.js,
+# styles/ and public/{img,fonts}; the final stage takes docker/ and
+# wp-content-extra/. Nothing else in the repo is needed to build the image.
+.git
+.github
+.claude
+node_modules
+docs
+deploy
+scripts
+# `*.md` alone only matches the repository root; `**/*.md` matches every
+# depth, which is what keeps wp-content-extra/mu-plugins/README.md out of
+# the image.
+*.md
+**/*.md
+# Committed build output. The theme stage always rebuilds these (and
+# webpack.config.js wipes public/js and public/css on load anyway), so the
+# committed copies must never be what ends up in the image.
+public/js
+public/css
+public/webpack.manifest.json
+**/.DS_Store
+compose*.yaml
+vendor
