@@ -129,19 +129,26 @@ cat known_hosts_staging
 
 ## 6. GitHub `staging` environment
 
+These are exactly the names `.github/workflows/release.yml` reads (through
+`.github/actions/remote-deploy`); the deploy job fails on its first step,
+naming what is missing, if any of them is unset.
+
+| Kind | Name | Value |
+|---|---|---|
+| secret | `DEPLOY_SSH_KEY` | private half of the deploy key pair |
+| variable | `DEPLOY_HOST` | the Elastic IP (or `staging.<domain>` in subdomain mode); what the runner SSHes to |
+| variable | `DEPLOY_USER` | `deploy` |
+| variable | `DEPLOY_KNOWN_HOSTS` | the `ssh-keyscan` line from step 5; pins the host key |
+| variable | `SITE_URL` | `https://<Elastic IP>` in IP-only mode, `https://staging.<domain>` in subdomain mode. No path, no trailing slash. The runner's smoke check fetches `SITE_URL/` and it becomes the environment's link in GitHub |
+| variable | `SMOKE_CA_CERT` | IP-only mode: the Caddy root PEM, set in step 8 once it exists. Subdomain mode: leave unset |
+
 ```bash
 gh secret   set DEPLOY_SSH_KEY      --env staging < cdpi-deploy-staging
 gh variable set DEPLOY_HOST         --env staging --body '<host or elastic ip>'
 gh variable set DEPLOY_USER         --env staging --body 'deploy'
 gh variable set DEPLOY_KNOWN_HOSTS  --env staging --body "$(cat known_hosts_staging)"
-# IP-only mode only; empty in subdomain mode
-gh variable set SMOKE_CA_CERT       --env staging --body "$(cat caddy-root.crt)"
-```
-
-Then destroy the private half everywhere except the GitHub secret:
-
-```bash
-shred -u cdpi-deploy-staging
+gh variable set SITE_URL            --env staging --body 'https://<host or elastic ip>'
+gh variable list --env staging
 ```
 
 Confirm the wrapper is the only thing reachable:
@@ -152,7 +159,7 @@ ssh -i cdpi-deploy-staging deploy@<host> 'ls /'        # refused, exit 126
 ssh -i cdpi-deploy-staging deploy@<host>               # refused, no shell
 ```
 
-(Run these before shredding the key, obviously.)
+Keep the private key file until step 13: steps 10 and 12 use it.
 
 ## 7. First boot of the stack
 
@@ -192,7 +199,14 @@ sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keyc
 
 This root is only trusted for the staging host; it is not a public CA and
 signs nothing else. Set `SMOKE_CA_CERT=/opt/cdpi/caddy-root.crt` in
-`/etc/cdpi/deploy.env`.
+`/etc/cdpi/deploy.env`, and give the same PEM to the workflow so the runner's
+smoke check can verify the certificate too:
+
+```bash
+gh variable set SMOKE_CA_CERT --env staging --body "$(cat cdpi-caddy-root.crt)"
+```
+
+(A multi-line variable is fine; the workflow writes it back to a file.)
 
 ## 9. Import the production content
 
@@ -232,6 +246,21 @@ ssh -i cdpi-deploy-staging deploy@<host> deploy sha-<40-hex-sha>
 ```
 
 The host prints all ten steps. Expect `=== DEPLOY OK ...`.
+
+Once step 8 is done (IP-only mode) and step 6's variables are all set, run the
+same deploy through the pipeline, which is what every merge to `main` will do
+from now on:
+
+```bash
+gh workflow run release.yml -f image_tag=sha-<40-hex-sha> -f environment=staging
+gh run watch "$(gh run list --workflow release.yml -L 1 --json databaseId -q '.[0].databaseId')"
+```
+
+Green means the runner reached the host over SSH with the pinned host key,
+the wrapper accepted the command, and the runner then saw the marker on
+`SITE_URL`. That is the WP6 acceptance test; a red run says which of the
+three it was. (If the run shows `deploy-staging` as *skipped*, step 13's
+`STAGING_DEPLOYS_ENABLED` is not set yet; set it and dispatch again.)
 
 ## 11. Rewrite the URLs and switch off indexing
 
@@ -286,9 +315,35 @@ works.
 
 ## 13. Hand-off
 
+Destroy the private half of the deploy key everywhere except the GitHub
+secret. From here on only the workflow can talk to the `deploy` account;
+humans use their named accounts and `sudo /usr/local/sbin/cdpi-deploy-root`
+(see `rollback.md` §2).
+
+```bash
+shred -u cdpi-deploy-staging
+```
+
 Record in the ADR folder: instance id, Elastic IP, security group, subnet, AMI,
 launch date, the named admin accounts, the key pair name, and where the `.pem`
 is vaulted. Note the address mode chosen in step 1 as an ADR-006 deviation if
 IP-only was used.
 
-Next: **WP6** wires `release.yml` to `ssh deploy@<host> deploy <tag>`.
+If the Elastic IP changes (it should not), update `DEPLOY_HOST`, `SITE_URL`
+and `DEPLOY_KNOWN_HOSTS` in the `staging` environment and the WordPress URLs
+(step 11) together.
+
+Finally, switch on automatic staging deploys. Until this **repository**
+variable is `true`, `release.yml` skips its `deploy-staging` job (the image
+still builds), so merges to `main` before this point never contact the host:
+
+```bash
+gh variable set STAGING_DEPLOYS_ENABLED --body true
+```
+
+Its production twin, `PRODUCTION_DEPLOYS_ENABLED`, is set at cutover
+(runbook 04). Unsetting either flag (or setting it to anything but `true`)
+pauses deploys to that environment without touching the workflow.
+
+Next: the next merge to `main` deploys itself to staging; `rollback.md`
+covers dispatching an older tag.

@@ -1,0 +1,206 @@
+name: Remote deploy
+description: >-
+  Deploys one image tag to a host over SSH (`ssh deploy@host deploy <tag>`,
+  answered by the forced-command wrapper in deploy/host/cdpi-deploy) and then
+  verifies from the runner that the public site serves that build.
+
+# Used by both deploy jobs in .github/workflows/release.yml. Everything this
+# action needs arrives as an input; it reads no secret or variable itself, so
+# the job that calls it (and its GitHub environment) is the only place access
+# is granted. Only the tag ever crosses the SSH session: registry credentials
+# live root-only on the host.
+
+inputs:
+  host:
+    description: SSH host (DEPLOY_HOST). A hostname or an IP address.
+    required: true
+  user:
+    description: SSH user (DEPLOY_USER); always `deploy`.
+    required: true
+  known_hosts:
+    description: known_hosts line(s) for the host (DEPLOY_KNOWN_HOSTS). Pins the host key.
+    required: true
+  ssh_key:
+    description: Private key for the deploy user (DEPLOY_SSH_KEY secret).
+    required: true
+  image_tag:
+    description: Tag to deploy, `sha-<40 hex>` or `vX.Y.Z`.
+    required: true
+  site_url:
+    description: Public URL of the site (SITE_URL), e.g. https://staging.example.org or https://203.0.113.10.
+    required: true
+  smoke_ca_cert:
+    description: PEM of the CA that signs the site certificate (SMOKE_CA_CERT). Empty for a public CA.
+    required: false
+    default: ''
+  environment:
+    description: Name shown in the job summary (staging or production).
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Check inputs
+      shell: bash
+      env:
+        HOST: ${{ inputs.host }}
+        USER_NAME: ${{ inputs.user }}
+        KNOWN_HOSTS: ${{ inputs.known_hosts }}
+        SSH_KEY: ${{ inputs.ssh_key }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
+        SITE_URL: ${{ inputs.site_url }}
+      run: |
+        set -euo pipefail
+        # The tag is validated again here (release.yml already did on
+        # dispatch) so this action is safe to call from anywhere.
+        if [[ ! $IMAGE_TAG =~ ^(sha-[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+          echo "::error::image_tag '$IMAGE_TAG' is not sha-<40 hex> or vX.Y.Z"
+          exit 1
+        fi
+        missing=()
+        [[ -n $HOST ]]        || missing+=(DEPLOY_HOST)
+        [[ -n $USER_NAME ]]   || missing+=(DEPLOY_USER)
+        [[ -n $KNOWN_HOSTS ]] || missing+=(DEPLOY_KNOWN_HOSTS)
+        [[ -n $SSH_KEY ]]     || missing+=(DEPLOY_SSH_KEY)
+        [[ -n $SITE_URL ]]    || missing+=(SITE_URL)
+        if [[ ${#missing[@]} -gt 0 ]]; then
+          echo "::error::The GitHub environment is not bootstrapped: missing ${missing[*]} (see docs/runbooks/02-staging-bootstrap.md §6)"
+          exit 1
+        fi
+        if [[ ! $SITE_URL =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
+          echo "::error::SITE_URL must be https://<host>[:port] with no path, got '$SITE_URL'"
+          exit 1
+        fi
+        echo "Deploying $IMAGE_TAG to $USER_NAME@$HOST, site $SITE_URL"
+
+    - name: Write the SSH key and pinned host key
+      shell: bash
+      env:
+        SSH_KEY: ${{ inputs.ssh_key }}
+        KNOWN_HOSTS: ${{ inputs.known_hosts }}
+      run: |
+        set -euo pipefail
+        umask 077
+        # printf, not echo: a key never goes through a command line, only
+        # through the environment, and the file is 0600 from the start.
+        printf '%s\n' "$SSH_KEY" >"$RUNNER_TEMP/deploy_key"
+        printf '%s\n' "$KNOWN_HOSTS" >"$RUNNER_TEMP/known_hosts"
+        chmod 0600 "$RUNNER_TEMP/deploy_key"
+        ssh-keygen -y -f "$RUNNER_TEMP/deploy_key" >/dev/null || {
+          echo "::error::DEPLOY_SSH_KEY is not a readable private key"; exit 1; }
+
+    - name: Deploy over SSH
+      shell: bash
+      env:
+        HOST: ${{ inputs.host }}
+        USER_NAME: ${{ inputs.user }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
+      run: |
+        set -euo pipefail
+        # The remote side is the sshd ForceCommand wrapper: it reads
+        # SSH_ORIGINAL_COMMAND, accepts exactly `deploy <tag>`, and runs the
+        # ten-step deploy as root. Its output streams straight into this log;
+        # a non-zero exit (including a failed smoke and automatic rollback on
+        # the host) fails this step.
+        ssh -i "$RUNNER_TEMP/deploy_key" \
+          -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+          -o StrictHostKeyChecking=yes \
+          -o IdentitiesOnly=yes \
+          -o BatchMode=yes \
+          -o ConnectTimeout=20 \
+          -o ServerAliveInterval=30 \
+          "$USER_NAME@$HOST" "deploy $IMAGE_TAG"
+
+    - name: Smoke check from the runner
+      id: smoke
+      shell: bash
+      env:
+        HOST: ${{ inputs.host }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
+        SITE_URL: ${{ inputs.site_url }}
+        SMOKE_CA_CERT: ${{ inputs.smoke_ca_cert }}
+      run: |
+        set -euo pipefail
+        site_url=${SITE_URL%/}
+        # https://host[:port] -> host, port
+        rest=${site_url#https://}
+        site_host=${rest%%:*}
+        port=443
+        [[ $rest == *:* ]] && port=${rest##*:}
+
+        # Fetch from the origin, not from whatever a CDN cached: --resolve pins
+        # the connection to the deploy host while keeping SNI and the Host
+        # header on the site name, so the certificate still has to match
+        # (ADR-007). In IP-only staging mode the two are the same address.
+        origin_ip=$(getent ahostsv4 "$HOST" | awk 'NR==1 {print $1}')
+        if [[ -z $origin_ip ]]; then
+          echo "::error::Cannot resolve DEPLOY_HOST '$HOST' to an IPv4 address"; exit 1
+        fi
+
+        curl_opts=(-sS --max-time 20 --resolve "$site_host:$port:$origin_ip")
+        if [[ -n $SMOKE_CA_CERT ]]; then
+          printf '%s\n' "$SMOKE_CA_CERT" >"$RUNNER_TEMP/smoke_ca.pem"
+          curl_opts+=(--cacert "$RUNNER_TEMP/smoke_ca.pem")
+        fi
+
+        if [[ $IMAGE_TAG == sha-* ]]; then
+          want=${IMAGE_TAG#sha-}
+          echo "Expecting HTTP 200 and <meta name=\"cdpi-build\" content=\"$want\"> from $site_url/ (origin $origin_ip)"
+        else
+          want=
+          echo "Expecting HTTP 200 and a 40-hex cdpi-build marker from $site_url/ (release $IMAGE_TAG; origin $origin_ip)"
+        fi
+
+        body=$RUNNER_TEMP/smoke_body
+        headers=$RUNNER_TEMP/smoke_headers
+        for attempt in $(seq 1 10); do
+          code=$(curl "${curl_opts[@]}" -o "$body" -D "$headers" -w '%{http_code}' "$site_url/" 2>"$RUNNER_TEMP/smoke_err") || {
+            code=000; : >"$headers"; : >"$body"; }
+          marker=$(grep -o -m1 'name="cdpi-build" content="[0-9a-f]\{40\}"' "$body" 2>/dev/null |
+            grep -o '[0-9a-f]\{40\}' || true)
+          if [[ $code == 200 && -n $marker && ( -z $want || $marker == "$want" ) ]]; then
+            echo "smoke: OK on attempt $attempt, HTTP 200, marker $marker"
+            echo "marker=$marker" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "smoke: attempt $attempt/10 HTTP $code marker=${marker:-none}$( [[ $code == 000 ]] && printf ' (%s)' "$(cat "$RUNNER_TEMP/smoke_err")" )"
+          sleep 6
+        done
+
+        echo "::error::Smoke check failed: $site_url/ did not serve HTTP 200 with the expected cdpi-build marker"
+        echo "--- last response headers ---"
+        cat "$headers" 2>/dev/null || true
+        echo "--- last curl error, if any ---"
+        cat "$RUNNER_TEMP/smoke_err" 2>/dev/null || true
+        exit 1
+
+    - name: Job summary
+      if: always()
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
+        SITE_URL: ${{ inputs.site_url }}
+        MARKER: ${{ steps.smoke.outputs.marker }}
+        SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+      run: |
+        set -euo pipefail
+        if [[ -n $MARKER ]]; then serving="\`$MARKER\`"; else serving="_not verified_"; fi
+        {
+          echo "## Deploy ${ENVIRONMENT:+to $ENVIRONMENT}"
+          echo
+          echo "| | |"
+          echo "|---|---|"
+          echo "| Environment | ${ENVIRONMENT:-?} |"
+          echo "| Image tag | \`$IMAGE_TAG\` |"
+          echo "| Serving commit | $serving |"
+          echo "| URL | $SITE_URL |"
+          echo "| Smoke | $SMOKE_OUTCOME |"
+        } >>"$GITHUB_STEP_SUMMARY"
+
+    - name: Remove the SSH key
+      if: always()
+      shell: bash
+      run: |
+        rm -f "$RUNNER_TEMP/deploy_key" "$RUNNER_TEMP/known_hosts" "$RUNNER_TEMP/smoke_ca.pem"

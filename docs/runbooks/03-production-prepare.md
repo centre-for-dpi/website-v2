@@ -133,9 +133,20 @@ sudo chown -R 33:33 "$MP"
 
 ## 8. Production deploy key and the `production` environment — *as runbook 02 §5–6, with `--env production`*
 
+Same names as runbook 02 §6, in the `production` environment: secret
+`DEPLOY_SSH_KEY`; variables `DEPLOY_HOST` (the Lightsail address the runner
+SSHes to), `DEPLOY_USER=deploy`, `DEPLOY_KNOWN_HOSTS`, `SITE_URL`
+(`https://<prod domain>`); no `SMOKE_CA_CERT` (public certificate). The
+runner's smoke check connects to `DEPLOY_HOST` with the site name as SNI, so
+it verifies the origin even with a CDN in front of the domain.
+
 Plus: the `production` GitHub environment has required reviewers
-(`adammwaniki`, `justMuriithi`) and the deploy job stays inert until the repo
-variable `PRODUCTION_DEPLOYS_ENABLED` is set at cutover.
+(`adammwaniki`, `justMuriithi`) and the `deploy-production` job in
+`release.yml` is skipped until the **repository** variable
+`PRODUCTION_DEPLOYS_ENABLED` is `true`
+(`gh variable set PRODUCTION_DEPLOYS_ENABLED --body true`, at cutover,
+runbook 04). Production is only ever reached by a manual dispatch, never by a
+push.
 
 ## 9. Shadow test — the point of this runbook
 
