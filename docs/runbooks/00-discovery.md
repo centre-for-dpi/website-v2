@@ -8,8 +8,7 @@ headers and prints them. The only file it creates is a tarball of
 `wp-content/mu-plugins` under `/tmp`, because the must-use plugins are not
 public packages and have to be copied from production into the image.
 
-Run by: the infra / release owner (you). The builder agent has no production
-access by design.
+Run by: the infra / release owner (you), as your named admin account.
 
 ## 1. Copy the script to the box
 

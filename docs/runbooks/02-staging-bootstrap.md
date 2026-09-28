@@ -4,12 +4,15 @@ Purpose: turn a provisioned host (runbook 01) into a working staging site
 carrying a copy of production content, and wire the GitHub `staging`
 environment to it.
 
-Run by: the builder agent over SSH as the named account `cdpi-agent`, or by
-the infra owner. Every step is journaled under the account that ran it.
+Run by: the infra owner, as their named admin account, following this
+runbook. Every step is journaled under the account that ran it. Verification
+by the supervisor is external only — the public HTTPS endpoint and its
+`cdpi-build` marker, the GitHub Actions logs, and the state of the GitHub
+`staging` environment — so nobody else needs, or has, an account on the host.
 
 Prerequisites: runbook 01 complete; a GHCR read-only token; a production
-database dump and uploads archive, copied onto the host by the infra owner
-(the agent has no production access); the Elastic IP associated.
+database dump and uploads archive, copied onto the host by the infra owner;
+the Elastic IP associated.
 
 ---
 
@@ -32,8 +35,8 @@ From a checkout, as your named account:
 
 ```bash
 rsync -a deploy/compose.yaml deploy/compose.staging.yaml deploy/Caddyfile \
-  cdpi-agent@<host>:/tmp/
-ssh cdpi-agent@<host> 'sudo install -o root -g root -m 0644 /tmp/compose.yaml /tmp/compose.staging.yaml /tmp/Caddyfile /opt/cdpi/ && rm -f /tmp/compose.yaml /tmp/compose.staging.yaml /tmp/Caddyfile'
+  <you>@<host>:/tmp/
+ssh <you>@<host> 'sudo install -o root -g root -m 0644 /tmp/compose.yaml /tmp/compose.staging.yaml /tmp/Caddyfile /opt/cdpi/ && rm -f /tmp/compose.yaml /tmp/compose.staging.yaml /tmp/Caddyfile'
 ```
 
 `compose.production.yaml` and `compose.shadow.yaml` are not needed on staging.
@@ -113,8 +116,8 @@ ssh-keygen -t ed25519 -a 64 -f cdpi-deploy-staging -C deploy@staging -N ''
 Install the **public** half on the host, root-owned:
 
 ```bash
-scp cdpi-deploy-staging.pub cdpi-agent@<host>:/tmp/
-ssh cdpi-agent@<host> 'sudo install -o root -g root -m 0644 /tmp/cdpi-deploy-staging.pub /etc/ssh/authorized_keys.d/deploy && rm -f /tmp/cdpi-deploy-staging.pub'
+scp cdpi-deploy-staging.pub <you>@<host>:/tmp/
+ssh <you>@<host> 'sudo install -o root -g root -m 0644 /tmp/cdpi-deploy-staging.pub /etc/ssh/authorized_keys.d/deploy && rm -f /tmp/cdpi-deploy-staging.pub'
 ```
 
 Record the host key so the workflow can pin it:
@@ -177,7 +180,7 @@ openssl x509 -in /opt/cdpi/caddy-root.crt -noout -subject -dates
 Each admin fetches it once and trusts it locally:
 
 ```bash
-scp cdpi-agent@<host>:/opt/cdpi/caddy-root.crt ./cdpi-caddy-root.crt
+scp <you>@<host>:/opt/cdpi/caddy-root.crt ./cdpi-caddy-root.crt
 # curl, ad hoc
 curl --cacert ./cdpi-caddy-root.crt https://<host>/
 # Linux system trust
@@ -271,7 +274,7 @@ ssh -i cdpi-deploy-staging deploy@<host> 'ls /'   ; echo "exit=$?"   # expect 12
 ssh -i cdpi-deploy-staging deploy@<host>          ; echo "exit=$?"   # expect 126
 
 # nobody used the shared key
-ssh cdpi-agent@<host> 'sudo journalctl -u ssh | grep "Accepted publickey" ; wtmpdb last ubuntu 2>/dev/null || true'
+ssh <you>@<host> 'sudo journalctl -u ssh | grep "Accepted publickey" ; wtmpdb last ubuntu 2>/dev/null || true'
 
 # host-side state and log
 ssh -i cdpi-deploy-staging deploy@<host> status

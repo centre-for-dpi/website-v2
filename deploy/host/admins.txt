@@ -35,4 +35,3 @@
 #
 # username	public key
 adam	ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMWqluFdepw8+aIYMcJs+6HAXnVEqPLcUMMK+ZtnEaY+ adam@cdpi staging admin
-cdpi-agent	ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPdLoIpQS+WKgA4cMHbQ3rMhjTSK7jQdHKBev4C63c/N adamndegwa@protonmail.com

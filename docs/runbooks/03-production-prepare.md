@@ -10,8 +10,7 @@ Purpose: get the Lightsail production host ready to serve the container image,
 verified by a shadow test, **without taking any traffic**. Apache keeps serving
 the live site throughout. Cutover is runbook 04 (WP9).
 
-Run by: the infra / release owner. The builder agent has no production access,
-by design.
+Run by: the infra / release owner, as their named admin account.
 
 ---
 

@@ -5,8 +5,10 @@ expects — Docker, swap, the `deploy` account, named admin accounts, firewall,
 fail2ban, auditd, and the forced-command SSH path. Nothing site-specific
 happens here; that is runbook 02 (staging) or 03 (production).
 
-Run by: the infra owner (production) or the builder agent (staging), as a
-**named** account, never as the provider's default account.
+Run by: the infra owner, as a **named** human admin account from
+`deploy/host/admins.txt`, never as the provider's default account. There is
+no agent or service account on the hosts; the only non-human account is
+`deploy`, which can run nothing but the deploy script.
 
 Applies to: EC2 staging (Ubuntu 26.04, cloud-init has already created the
 named accounts and `/etc/ssh/sshd_config.d/00-cdpi-access.conf`) and the
