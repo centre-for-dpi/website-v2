@@ -1,48 +1,89 @@
-# `wp-content-extra/mu-plugins/` — PLACEHOLDER, awaiting review
+# `wp-content-extra/mu-plugins/`
 
-Everything in this directory is copied verbatim into
-`/var/www/html/wp-content/mu-plugins/` in the container image. It is empty on
-purpose right now: it holds nothing but this README.
+Everything in this directory except this README is copied verbatim into
+`/var/www/html/wp-content/mu-plugins/` in the container image. WordPress
+auto-loads every top-level `.php` file there on every request, with no way to
+deactivate it from wp-admin, so nothing lands here without a line-by-line
+review recorded in the PR that adds it.
 
-## Why it exists
+## What is shipped
 
-Production runs three must-use plugins that are **not** public packages, so
-Composer cannot install them (`composer.json` covers only the six WPackagist
-plugins). From the user's `wp plugin list`:
-
-| Plugin | Version | Notes |
+| File | Version | Decision |
 | --- | --- | --- |
-| `cdn-cache-purge` | 2.0.0 | Implies a CDN in front of the live site; purging on deploy is a WP9 concern. |
-| `wp-cli-login-server` | 1.2 | Grants magic-link admin logins. Review before shipping: it is an authentication bypass by design. |
-| `security-helper` | 2.0.0 | Unknown provenance. Must be read line by line before it goes into an image. |
+| `security-helper.php` | 2.0.0 | **Kept.** Production's copy, byte for byte. See below. |
 
-Until they are reviewed and committed here, an image built from this branch
-runs **without** them. That is the safe default: shipping unreviewed
-third-party PHP into a baked artifact would defeat the point of ADR-004.
+`security-helper.php` is Nestify-era code (the previous managed host) and is
+kept for behaviour parity at cutover: the site must behave the same the moment
+it moves from the Lightsail box to the container, and this file changes what
+editors see in wp-admin. What it does:
 
-## How they get committed
+- hides the core-update UI (Dashboard > Updates menu, the update nag, the
+  admin-bar updates item, the "Get Version x.y" footer);
+- removes the Right Now, Activity and WordPress Events and News dashboard
+  widgets;
+- removes several Site Health tests (background updates, scheduled events,
+  WordPress version, loopback, REST availability, page cache, persistent
+  object cache) and the scheduled-events info panel;
+- on every admin page load by a logged-in user, deletes any user whose login
+  starts with `deleted`, `wp_update`, `wpcron` or `yanz` (a clean-up for a
+  past compromise, left running);
+- on login, rejects passwords that are `password`, a single repeated
+  character, shorter than 8 characters, or found in the Have I Been Pwned
+  range API (`api.pwnedpasswords.com`; only the first five characters of the
+  SHA-1 hash leave the server, and a failed lookup lets the login proceed);
+- blocks updates to the `widget_custom_html` option, so the Custom HTML widget
+  cannot be configured;
+- fires the `rt_nginx_helper_after_purge_all` action when a scheduled post is
+  published. Nothing listens to that action in this image (see the dropped
+  files below), so this is a no-op apart from one `error_log` line. Known
+  wart, present on production too: the callback is hooked to
+  `transition_post_status`, whose first argument is the new status, not a
+  post ID, so `get_post()` returns null and PHP logs
+  `Attempt to read property "post_status" on null` (line 138) on every status
+  transition. Harmless, but noisy in the container log.
 
-1. The infra owner runs `scripts/host/discover.sh` on the Lightsail box, which
-   tars `wp-content/mu-plugins` for review.
-2. Read every file. Anything that phones home, writes to the docroot, or
-   bypasses authentication gets an explicit decision recorded in the PR, not a
-   silent `git add`.
-3. Unpack the approved files directly into this directory, preserving layout:
-   a top-level `*.php` loader plus any subdirectory it includes. WordPress
-   auto-loads **only** top-level `.php` files in `mu-plugins/`; files in
-   subdirectories must be `require`d by a top-level loader.
-4. Open a PR touching only `wp-content-extra/mu-plugins/**`, so the diff is
-   reviewable on its own.
+It contains no credentials, no host names other than the HIBP API, and writes
+nothing to the docroot. Trimming it to what the site still needs (the update
+UI hiding and the password checks are the likely keepers; the user-deletion
+sweep, the Site Health removals and the nginx action are candidates to go) is a
+WP11 hardening follow-up, not part of the cutover.
+
+## What was dropped, and why
+
+Production's `wp-content/mu-plugins/` held three more things, all leftovers
+from the Nestify hosting stack. Production today is Apache on Lightsail with
+no nginx page cache, no Redis and no CDN (verified from the live site's
+response headers), so none of them does anything useful there, and one of
+them phones out to a third party. None is shipped.
+
+| Dropped | Reason |
+| --- | --- |
+| `cdn-cache-purge.php` | Nestify shim: requires the bundled `nginx-helper/`, points it at Redis on `127.0.0.1:6379` (nothing listens) and POSTs the hostname plus every changed URL to `https://my.nestify.io/cdn/purge/1/purge` on each purge event. Data leaves the site for a host we no longer use. |
+| `nginx-helper/` | A full copy of the rtCamp nginx-helper plugin, loaded only by the shim above. No nginx, no cache to purge. |
+| `wp-cli-login-server.php` | Serves the `wp login` magic-link command. An authentication bypass by design, and unused. |
+
+No credentials were found in any of the four.
 
 ## Why the README is not shipped
 
 `.dockerignore` excludes `**/*.md`, so this file never enters the build
-context and cannot reach the image. The directory itself still does (Docker
-sends an excluded directory as an empty directory), which is all the
-Dockerfile's `COPY` needs; `docker run --rm cdpi-local ls -A
-/var/www/html/wp-content/mu-plugins` prints nothing. Git will not track an
-empty directory, so this README is also what keeps the directory in the
-repository until real mu-plugins land.
+context and cannot reach the image. The Dockerfile's `COPY` of this directory
+therefore delivers `security-helper.php` and nothing else:
+`docker run --rm cdpi-local ls -A /var/www/html/wp-content/mu-plugins` prints
+`security-helper.php` alone.
+
+## Adding or changing a must-use plugin
+
+1. Read every file. Anything that phones home, writes to the docroot, or
+   bypasses authentication gets an explicit keep/drop decision recorded in
+   the PR, not a silent `git add`.
+2. Put the approved files directly in this directory, preserving layout: a
+   top-level `*.php` loader plus any subdirectory it includes. WordPress
+   auto-loads **only** top-level `.php` files in `mu-plugins/`; files in
+   subdirectories must be `require`d by a top-level loader.
+3. Open a PR touching only `wp-content-extra/mu-plugins/**` (plus this README
+   and runbook 20), so the diff is reviewable on its own.
+4. Verify with runbook 20 section 4: `wp plugin list --status=must-use`.
 
 ## Note for `DISALLOW_FILE_MODS`
 

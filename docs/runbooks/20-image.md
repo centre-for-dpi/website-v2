@@ -17,7 +17,7 @@ GHCR, deployed unchanged to staging and production (ADR-004). It contains:
 | WordPress core + Apache + PHP | `wordpress:${WP_IMAGE_TAG}` (official image) | Core is copied from `/usr/src/wordpress` into `/var/www/html` **at build time**, so the official entrypoint's first-run copy never happens. |
 | `wp-config.php` | `docker/wp-config.php` | Upstream `wp-config-docker.php` plus `WP_HOME`/`WP_SITEURL` from env, `DISALLOW_FILE_MODS`, auto-updates off, `DISABLE_WP_CRON` from env. Every value comes from the environment; nothing secret is in the file. |
 | Plugins | `composer.json` / `composer.lock` via WPackagist | Six plugins pinned to production's exact versions. `composer validate --strict --no-check-all` in the build fails if the lock is stale. |
-| Must-use plugins | `wp-content-extra/mu-plugins/` | Empty placeholder until production's three mu-plugins are reviewed and committed (section 6). |
+| Must-use plugins | `wp-content-extra/mu-plugins/` | `security-helper.php` only, production's copy byte for byte; the other three items found on production were dropped after review (section 6). |
 | Theme | this repository, built in the `theme` stage | `npm ci && npm run build` in `node:22-bookworm-slim`, then only `style.css`, `screenshot.png`, root `*.php`, `src/`, `templates/`, `public/` ship. Committed `public/js`, `public/css` and the manifest are excluded by `.dockerignore` and rebuilt. |
 | WP-CLI | `wordpress:${WP_CLI_IMAGE_TAG}` | `/usr/local/bin/wp`, for `wp core update-db` during deploys and for local setup. |
 | `php.ini` overrides | `docker/php/cdpi.ini` | Upload/memory/time limits templated from build ARGs; errors to stderr; opcache without timestamp validation (the docroot never changes at runtime). |
@@ -201,27 +201,35 @@ unaffected: `--rm` also removes the anonymous volume it created.
 `compose.dev.yaml` is a throwaway stack, so locally `down -v` covers it, but
 after rebuilding the image use `up -d -V` to see the new build.
 
-## 6. Must-use plugins: how they get committed
+## 6. Must-use plugins
 
-Production runs three mu-plugins that are not public packages
-(`cdn-cache-purge` 2.0.0, `wp-cli-login-server` 1.2, `security-helper` 2.0.0).
-They arrive as the tarball `discover.sh` produces (runbook 00). Then:
+Production's `wp-content/mu-plugins/` (tarball from `discover.sh`, runbook 00)
+was reviewed on 2026-09-28. It held four things, all from the previous managed
+host (Nestify). One is shipped; three are dropped. The full reasoning lives in
+`wp-content-extra/mu-plugins/README.md`; in short:
 
-1. Read every file. `wp-cli-login-server` is an authentication mechanism by
-   design and `security-helper` is of unknown provenance; each gets an
-   explicit keep/drop decision recorded in the PR.
-2. Unpack the approved files into `wp-content-extra/mu-plugins/`, preserving
-   the layout: a top-level `*.php` loader plus any subdirectory it includes.
-   WordPress auto-loads only top-level `.php` files in `mu-plugins/`.
-3. Open a PR touching only `wp-content-extra/mu-plugins/**` so the diff stands
-   on its own. The Dockerfile already copies the directory; nothing else
-   changes. `.dockerignore` keeps `*.md` out of the image, so the README in that
-   directory can stay.
-4. Verify locally with section 4: `wp plugin list --status=must-use`.
+| Item | Decision |
+| --- | --- |
+| `security-helper.php` 2.0.0 | **Shipped**, byte for byte. Hides the core-update UI, removes some Site Health tests, deletes users whose login starts with `deleted`/`wp_update`/`wpcron`/`yanz` on admin page loads, checks passwords against the Have I Been Pwned range API, blocks the Custom HTML widget option, fires a no-op nginx purge action on scheduled posts. Kept for behaviour parity at cutover; trimming it is a WP11 follow-up. |
+| `cdn-cache-purge.php` | Dropped. Nestify shim around `nginx-helper/`: Redis at `127.0.0.1:6379`, POSTs hostname and changed URLs to `my.nestify.io` on every purge. Production is Apache on Lightsail with no nginx cache, no Redis, no CDN (verified from response headers). |
+| `nginx-helper/` | Dropped. Full copy of the rtCamp plugin, loaded only by the shim above. |
+| `wp-cli-login-server.php` | Dropped. Serves the `wp login` magic-link command; an authentication bypass by design, and unused. |
 
-Until then, images built from this repository run **without** them.
-`cdn-cache-purge` in particular implies a CDN in front of the site whose purge
-step belongs to the cutover (WP9).
+No credentials were found in any of them. `.dockerignore` keeps `**/*.md` out
+of the build context, so the README next to `security-helper.php` never
+reaches the image:
+
+```bash
+docker run --rm cdpi-local ls -la /var/www/html/wp-content/mu-plugins/   # security-helper.php only
+docker compose -f compose.dev.yaml run --rm --user www-data wordpress wp plugin list --status=must-use
+```
+
+To add or change a must-use plugin: read every file, record a keep/drop
+decision in the PR, place the approved top-level `*.php` (plus any
+subdirectory it `require`s) in `wp-content-extra/mu-plugins/`, and verify
+with the two commands above. WordPress auto-loads only top-level `.php` files
+in `mu-plugins/`. The Dockerfile already copies the directory; nothing else
+changes.
 
 ## 7. Release workflow (`.github/workflows/release.yml`)
 
