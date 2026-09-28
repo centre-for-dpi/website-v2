@@ -20,7 +20,7 @@
         "wpackagist-plugin/duracelltomi-google-tag-manager": "1.22.3",
         "wpackagist-plugin/mailchimp-for-wp": "4.12.5",
         "wpackagist-plugin/redirection": "5.7.5",
-        "wpackagist-plugin/wordpress-importer": "0.9.5"
+        "wpackagist-plugin/wordpress-importer": "0.9.6"
     },
     "config": {
         "allow-plugins": {
