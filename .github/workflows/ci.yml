@@ -1,0 +1,148 @@
+name: CI
+
+# Runs on every pull request (any target branch) and on pushes to main, so the
+# same two checks that gate a merge also confirm the merge commit itself.
+# This workflow references no secret of any kind, and it deliberately uses the
+# plain pull-request trigger rather than the variant that runs against the base
+# repository with write access: a pull request from a fork must never be able to
+# read repository credentials. The only permission granted is reading code.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One CI run per ref. Pushing again to a branch cancels the superseded run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The job id and the job name are both "lint" on purpose: that string is the
+  # required status check context configured on the main branch ruleset in WP2.
+  # Renaming either half silently turns the branch protection into a no-op.
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node from .nvmrc
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Check formatting with prettier
+        run: npm run lint
+
+      - name: Check PHP syntax
+        env:
+          PHP_IMAGE: php:8.2-cli
+        run: |
+          set -euo pipefail
+
+          # The PHP version is pinned by this image tag rather than by whatever
+          # the runner image happens to ship, so the syntax check matches the
+          # PHP the site runs on. ubuntu-latest has Docker preinstalled.
+          docker pull --quiet "$PHP_IMAGE"
+
+          work="$(mktemp -d)"
+          : >"$work/passed"
+          : >"$work/failed"
+          : >"$work/messages"
+
+          # NUL-delimited so no filename can be split or globbed. node_modules/
+          # is npm's tree and vendor/ is Composer's target (arrives in WP3):
+          # third-party code is not ours to lint.
+          find . -type f -name '*.php' \
+            -not -path './node_modules/*' \
+            -not -path './vendor/*' \
+            -not -path './.git/*' \
+            -print0 >"$work/files"
+
+          # One `php -l` per file, so one bad file cannot mask the rest: every
+          # result is recorded and all of them are reported, rather than the run
+          # stopping at the first failure. The loop runs inside a single
+          # container because one container for the whole tree takes seconds
+          # where one container per file takes minutes.
+          cat >"$work/lint.sh" <<'INNER'
+          #!/usr/bin/env bash
+          set -uo pipefail
+          check_one() {
+            local out
+            if out="$(php -l "$1" 2>&1)"; then
+              printf '%s\n' "$1" >>/ci/passed
+            else
+              printf '%s\n' "$1" >>/ci/failed
+              printf -- '--- %s\n%s\n\n' "$1" "$out" >>/ci/messages
+            fi
+            return 0
+          }
+          export -f check_one
+          # -r matters: without it, xargs on empty input still runs the command
+          # once with no argument, which would `php -l` the literal string "bash"
+          # and report a file that does not exist instead of letting the
+          # "no PHP files found" guard below fire.
+          xargs -0 -r -n1 bash -c 'check_one "$0"' </ci/files
+          INNER
+
+          docker run --rm -v "$PWD":/app -w /app -v "$work":/ci "$PHP_IMAGE" \
+            bash /ci/lint.sh
+
+          n_passed="$(wc -l <"$work/passed")"
+          n_failed="$(wc -l <"$work/failed")"
+          total=$((n_passed + n_failed))
+          echo "php -l ($PHP_IMAGE): checked $total PHP file(s), $n_failed did not parse"
+
+          if [ "$total" -eq 0 ]; then
+            echo "No PHP files were found, which cannot be right for a WordPress theme." >&2
+            exit 1
+          fi
+
+          # Every PHP file in the theme must parse. There is no allowlist: a file
+          # that php -l rejects is a file that is a fatal error the moment
+          # WordPress includes it, so the only correct verdict is to fail.
+          # Reporting is line-based below, which assumes no newline in a PHP
+          # filename; the scan itself is NUL-safe either way.
+          if [ "$n_failed" -gt 0 ]; then
+            echo "----- php -l output for every file that did not parse -----"
+            cat "$work/messages"
+            echo "----------------------------------------------------------"
+            while IFS= read -r file; do
+              echo "::error file=$file::php -l failed"
+              echo "php -l failed: $file" >&2
+            done <"$work/failed"
+            exit 1
+          fi
+
+  # Job id and name are both "build" for the same reason as "lint" above.
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node from .nvmrc
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build the theme assets
+        run: npm run build
+
+      - name: Check the webpack manifest
+        run: bash scripts/ci/check-manifest.sh

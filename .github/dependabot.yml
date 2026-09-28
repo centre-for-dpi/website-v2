@@ -1,0 +1,53 @@
+# Dependabot keeps the two things CI depends on from going stale: the commit
+# SHAs the workflows pin their actions to, and the npm build toolchain. Updates
+# arrive as ordinary pull requests, so they go through the same lint and build
+# checks as any other change.
+version: 2
+updates:
+  # Rewrites the pinned SHA and the "# vX.Y.Z" comment together, which is the
+  # only maintainable way to keep SHA-pinned actions current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: ["dependencies"]
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+    commit-message:
+      prefix: chore
+      prefix-development: chore
+    groups:
+      # Everything that participates in producing public/js and public/css.
+      # These move together and are only meaningful when reviewed together: the
+      # acceptance test for any of them is that `npm run build` still emits a
+      # working manifest, which the build job checks on the grouped PR.
+      build-toolchain:
+        dependency-type: development
+        patterns:
+          - "webpack*"
+          - "*-webpack-plugin"
+          - "*-loader"
+          - "sass*"
+          - "postcss*"
+          - "autoprefixer"
+          - "babel*"
+          - "@babel/*"
+          - "css-*"
+          - "mini-css-extract-plugin"
+      # Formatting and git hooks. These cannot change the built output, so they
+      # are reviewed separately and can be merged on a glance at the diff.
+      dev-tooling:
+        dependency-type: development
+        patterns:
+          - "prettier"
+          - "husky"
+          - "lint-staged"
