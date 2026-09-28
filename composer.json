@@ -15,7 +15,7 @@
     ],
     "require": {
         "composer/installers": "^2",
-        "wpackagist-plugin/advanced-custom-fields": "6.8.1",
+        "wpackagist-plugin/advanced-custom-fields": "6.8.10",
         "wpackagist-plugin/custom-post-type-ui": "1.19.2",
         "wpackagist-plugin/duracelltomi-google-tag-manager": "1.22.3",
         "wpackagist-plugin/mailchimp-for-wp": "4.12.5",
