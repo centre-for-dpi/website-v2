@@ -12,7 +12,8 @@ by the supervisor is external only — the public HTTPS endpoint and its
 
 Prerequisites: runbook 01 complete; a GHCR read-only token; a production
 database dump and uploads archive, copied onto the host by the infra owner;
-the Elastic IP associated.
+a stable public address (the Elastic IP, or the current public IPv4 while the
+EIP allocation is pending; do not stop/start the instance in that case).
 
 ---
 
@@ -42,6 +43,13 @@ ssh <you>@<host> 'sudo install -o root -g root -m 0644 /tmp/compose.yaml /tmp/co
 `compose.production.yaml` and `compose.shadow.yaml` are not needed on staging.
 
 ## 3. Create `/etc/cdpi/*.env`
+
+First, read the table prefix from the production dump (on the laptop, before
+copying it over), so `WORDPRESS_TABLE_PREFIX` below matches it:
+
+```bash
+zcat ~/cdpi-prod.sql.gz | grep -m1 'CREATE TABLE'
+```
 
 All four are root-owned and 0600 inside `/etc/cdpi` (0700). Copy the `.example`
 files from the repo as a starting point and fill them in **on the host** —
@@ -85,9 +93,10 @@ said otherwise).
 
 ## 4. Registry credentials
 
-The infra owner creates a **fine-grained** GitHub PAT with only
-`read:packages` on the organisation's packages, no repo scopes, and an expiry
-that matches the quarterly key rotation. Then, on the host:
+The infra owner creates a **classic** GitHub personal access token carrying
+only the `read:packages` scope (no repo scopes) with a 90-day expiry. Classic
+is specified because fine-grained tokens are not reliably accepted by the
+container registry for pulls. Then, on the host:
 
 ```bash
 sudo -i
@@ -210,8 +219,18 @@ gh variable set SMOKE_CA_CERT --env staging --body "$(cat cdpi-caddy-root.crt)"
 
 ## 9. Import the production content
 
-The infra owner copies the dump and uploads archive onto the host (for example
-into `/var/tmp/prod/`). Then:
+The infra owner usually has a gzipped dump (`~/cdpi-prod.sql.gz`) and an
+uploads **directory** (`~/cdpi-uploads/`, from `rsync`) on the laptop. Create
+a staging area on the host and copy both over:
+
+```bash
+# from the laptop
+ssh <you>@<host> 'sudo install -d -o <you> -m 0700 /var/tmp/prod'
+scp ~/cdpi-prod.sql.gz <you>@<host>:/var/tmp/prod/
+rsync -az ~/cdpi-uploads/ <you>@<host>:/var/tmp/prod/uploads/
+```
+
+Then, on the host:
 
 ```bash
 cd /opt/cdpi
@@ -219,21 +238,25 @@ DC="docker compose -f compose.yaml -f compose.staging.yaml"
 
 # database
 sudo $DC up -d db
-sudo $DC exec -T db sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"' < /var/tmp/prod/prod-dump.sql
-# if the dump is gzipped:
-# gunzip -c /var/tmp/prod/prod-dump.sql.gz | sudo $DC exec -T db sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"'
+gunzip -c /var/tmp/prod/cdpi-prod.sql.gz | sudo $DC exec -T db sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"'
 
 # uploads into the named volume
 MP=$(sudo docker volume inspect -f '{{.Mountpoint}}' cdpi_uploads)
-sudo tar -xzf /var/tmp/prod/uploads.tar.gz -C "$MP" --strip-components=1   # adjust to the archive's layout
+sudo rsync -a /var/tmp/prod/uploads/ "$MP"/
 sudo chown -R 33:33 "$MP"    # www-data inside the container is uid/gid 33
 sudo du -sh "$MP"
 ```
 
+Alternative: if the uploads arrived as a tarball instead of a directory,
+replace the `rsync` into the volume with
+`sudo tar -xzf /var/tmp/prod/uploads.tar.gz -C "$MP" --strip-components=1`
+(adjust `--strip-components` to the archive's layout), then run the same
+`chown`.
+
 Then delete the production copies from the host:
 
 ```bash
-sudo shred -u /var/tmp/prod/prod-dump.sql* ; sudo rm -rf /var/tmp/prod
+sudo shred -u /var/tmp/prod/cdpi-prod.sql.gz ; sudo rm -rf /var/tmp/prod
 ```
 
 ## 10. First deploy
