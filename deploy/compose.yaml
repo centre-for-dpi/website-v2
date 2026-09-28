@@ -42,6 +42,19 @@ services:
     # Deliberately fails fast rather than pulling a stale or empty tag.
     image: ghcr.io/centre-for-dpi/website-v2:${IMAGE_TAG:?set IMAGE_TAG}
     restart: unless-stopped
+    # INHERITED ANONYMOUS VOLUME. The wordpress:*-apache base image declares
+    # `VOLUME /var/www/html`, so every container gets an anonymous volume
+    # there, seeded from the image on first start, even though our image
+    # bakes the site into that path. A plain `docker compose up -d` (with or
+    # without --force-recreate) re-attaches the previous container's
+    # anonymous volume, so the OLD docroot keeps being served after an image
+    # change. cdpi-deploy-root therefore always runs `up -d
+    # --renew-anon-volumes` and prunes the volume it leaves behind; that
+    # script is the only supported way to (re)start this service. Do not
+    # "fix" this by mounting anything at /var/www/html: a bind mount or named
+    # volume there would pin the docroot to whatever was first copied in and
+    # defeat image-based deploys entirely.
+    # (The `uploads` volume below is named, mounted on top, and unaffected.)
     # NOTE: no ports here. Only Caddy is published; the app is reachable
     # only on the compose network. compose.shadow.yaml is the one exception.
     env_file:

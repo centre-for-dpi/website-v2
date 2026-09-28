@@ -39,7 +39,7 @@ ssh deploy@<host> rollback
 ```
 
 That redeploys whatever the host recorded as `previous_tag` in
-`/var/lib/cdpi/previous_tag`, through exactly the same nine steps as a deploy —
+`/var/lib/cdpi/previous_tag`, through exactly the same ten steps as a deploy —
 including a fresh backup before it starts and the smoke check after. If you
 need a specific older tag instead of the immediate predecessor:
 
@@ -48,6 +48,16 @@ ssh deploy@<host> deploy sha-<older-40-hex>
 ```
 
 Nothing else is accepted over that SSH connection; there is no shell.
+
+**Do not roll back by editing `/opt/cdpi/.env` and running
+`docker compose up -d` as an admin.** The `wordpress:*-apache` base image
+declares `VOLUME /var/www/html`, so a plain `up -d` (even with
+`--force-recreate`) re-attaches the previous container's anonymous volume and
+keeps serving the *current* files under the *old* tag's ENV — the
+`cdpi-build` marker would even claim the rollback worked. The deploy script
+runs `up -d --renew-anon-volumes` and prunes the orphaned volume afterwards;
+it is the only supported path. See `deploy/README.md` § "The base image's
+anonymous volume".
 
 ## 3. Automatic rollback
 

@@ -12,8 +12,9 @@
 #   cdpi-deploy-root rollback
 #   cdpi-deploy-root --dry-run deploy <tag>     # print, execute nothing
 #
-# Deploy order (ADR-007): backup -> pull -> migrate -> swap -> smoke ->
-# (on failure) roll back to the previous tag -> prune.
+# Deploy order (ADR-007): backup -> pull -> migrate -> swap (renewing the
+# anonymous /var/www/html volume) -> smoke -> (on failure) roll back to the
+# previous tag -> prune images and the anonymous volume left by the swap.
 #
 # Environment overrides, for testing only (defaults are the host paths):
 #   CDPI_DRY_RUN=1        same as --dry-run
@@ -26,6 +27,12 @@
 #   CDPI_SMOKE_ANY=1      accept HTTP 200 without checking the build marker.
 #                         Only for bringing the stack up with a placeholder
 #                         image; never set this on a real host.
+#   CDPI_SKIP_REGISTRY_LOGIN=1
+#                         skip `docker login ghcr.io` and, because a pull
+#                         cannot succeed without it, the pull as well; the
+#                         tag must already exist locally (checked). Only for
+#                         exercising this script against a locally tagged
+#                         placeholder image; never set this on a real host.
 set -euo pipefail
 
 TAG_RE='^(sha-[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+)$'
@@ -116,7 +123,8 @@ for arg in "$@"; do
 	case $arg in
 	--dry-run) DRY=1 ;;
 	-h | --help)
-		sed -n '2,30p' "$0"
+		# The header comment, up to the first non-comment line.
+		awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0"
 		exit 0
 		;;
 	*) positional+=("$arg") ;;
@@ -400,6 +408,35 @@ prune_images() {
 	log "prune: dangling images removed"
 }
 
+# prune_volumes — remove the anonymous volume the replaced wordpress container
+# left behind (see the comment above the swap step in deploy_tag; `up -d -V`
+# creates a fresh one and leaves the old one dangling).
+#
+# `docker volume prune` WITHOUT --all removes only anonymous volumes that no
+# container references. That is the behaviour of Docker Engine >= 23.0 (API
+# 1.42, Feb 2023): the engine labels every anonymous volume
+# `com.docker.volume.anonymous`, the default prune is limited to those, and
+# `--all` is what it takes to touch a named volume. On an older engine the
+# default prune removed EVERY unreferenced volume, named ones included -- and
+# under compose.shadow.yaml cdpi_caddy_data is unreferenced, because caddy is
+# parked. The explicit label filter closes that gap: an old engine sets no
+# such label, so nothing matches and the call is a no-op; on a current engine
+# it is redundant with the default. Either way the named volumes cdpi_uploads,
+# cdpi_db_data, cdpi_caddy_data and cdpi_caddy_config are never candidates.
+prune_volumes() {
+	if [[ $DRY == 1 ]]; then
+		log "DRY-RUN: docker volume prune -f --filter label=com.docker.volume.anonymous (anonymous, unreferenced volumes only; named volumes are never touched)"
+		return 0
+	fi
+	local out n
+	if ! out=$(docker volume prune -f --filter label=com.docker.volume.anonymous 2>&1); then
+		log "prune: docker volume prune failed (not fatal): ${out//$'\n'/ }"
+		return 0
+	fi
+	n=$(grep -cE '^[0-9a-f]{64}$' <<<"$out" || true)
+	log "prune: $n anonymous volume(s) removed; $(grep -o 'Total reclaimed space:.*' <<<"$out" || echo 'nothing reclaimed')"
+}
+
 # ---------------------------------------------------------------------------
 # actions
 # ---------------------------------------------------------------------------
@@ -425,6 +462,11 @@ migrate() {
 		# Nothing else to start: the database is on the host.
 		extra=--no-deps
 	fi
+	# `run --rm` removes the one-off container together with its anonymous
+	# volumes when it exits (the base image's VOLUME /var/www/html makes one
+	# per container; see the swap step), so this leaves nothing behind.
+	# Verified with compose v5.5.1: `docker volume ls` is identical before
+	# and after. `run` also never touches the running wordpress container.
 	run_sh "IMAGE_TAG='$IMAGE_TAG' $DC_STR run --rm $extra --user www-data wordpress wp core update-db"
 }
 
@@ -448,7 +490,42 @@ action_status() {
 	tail -n 5 "$LOG_FILE" 2>/dev/null || echo "(no log yet)"
 }
 
-# deploy_tag <tag> — the whole nine-step sequence. `rollback` reuses it,
+# The `up -d` that (re)creates the wordpress container. Always with -V:
+#
+#   The official wordpress:*-apache base image declares VOLUME /var/www/html.
+#   Our image bakes the whole site into that path at build time, but the
+#   VOLUME declaration makes Docker mount an ANONYMOUS VOLUME there on the
+#   container's first start, seeded from the image's files. When compose
+#   recreates the container for a new tag it re-attaches that SAME anonymous
+#   volume (that is what "retrieving data from the previous container" in
+#   `up --help` means), so a plain `up -d` -- or `--force-recreate` -- keeps
+#   serving the OLD docroot from the old volume; only ENV changes. The
+#   cdpi-build smoke marker comes from an ENV var, not from a file, so it
+#   cannot catch this. --renew-anon-volumes (-V) makes compose create a
+#   fresh anonymous volume seeded from the NEW image, which is the only
+#   thing that makes a redeploy actually ship the new files. Proven in
+#   PR #5 "Review fix 2": a file planted in /var/www/html survived
+#   --force-recreate on the same volume id and was gone only with -V.
+#   NEVER remove the flag. The old volume is left dangling and is removed
+#   by prune_volumes once the new container has passed the smoke check.
+#
+#   -V also implies --force-recreate for every service the `up` selects
+#   (verified with compose v5.5.1: an unscoped `up -d -V` recreated db and
+#   caddy too, config unchanged), which would restart MySQL on every staging
+#   deploy. So the swap is two commands: -V scoped to the wordpress service
+#   alone (--no-deps: db is already up and healthy from the migration step,
+#   or lives on the host), then a plain `up -d` that starts anything not yet
+#   running (caddy on a first deploy) and recreates nothing whose config is
+#   unchanged. Caddy resolves `wordpress` per request, so it needs no restart.
+#
+#   The named uploads volume is unaffected: it is mounted on top at
+#   wp-content/uploads, is never anonymous, and is never pruned.
+swap_containers() {
+	run_sh "$DC_STR up -d --no-build --no-deps --renew-anon-volumes wordpress"
+	run_sh "$DC_STR up -d --no-build --remove-orphans"
+}
+
+# deploy_tag <tag> — the whole ten-step sequence. `rollback` reuses it,
 # which is what makes rollback the same code path as a deploy.
 deploy_tag() {
 	local tag=$1 ts cur prev
@@ -459,16 +536,25 @@ deploy_tag() {
 	ensure_dirs
 	ts=$(date -u '+%Y%m%dT%H%M%SZ')
 
-	log "step 1/9 backup (timestamp $ts)"
+	log "step 1/10 backup (timestamp $ts)"
 	backup_db "$ts"
 	backup_uploads "$ts"
 	prune_backups
 
-	log "step 2/9 registry login and image pull"
-	registry_login
-	run_sh "IMAGE_TAG='$tag' timeout 600 $DC_STR pull wordpress"
+	log "step 2/10 registry login and image pull"
+	if [[ ${CDPI_SKIP_REGISTRY_LOGIN:-0} == 1 ]]; then
+		# Test-only override, see the header. No login, hence no pull.
+		log "TEST-ONLY: CDPI_SKIP_REGISTRY_LOGIN=1, skipping docker login and pull; using local image $IMAGE_REPO:$tag"
+		if [[ $DRY != 1 ]]; then
+			docker image inspect "$IMAGE_REPO:$tag" >/dev/null 2>&1 ||
+				die "CDPI_SKIP_REGISTRY_LOGIN=1 but $IMAGE_REPO:$tag is not present locally"
+		fi
+	else
+		registry_login
+		run_sh "IMAGE_TAG='$tag' timeout 600 $DC_STR pull wordpress"
+	fi
 
-	log "step 3/9 record the tag we are replacing"
+	log "step 3/10 record the tag we are replacing"
 	cur=$(read_state "$CURRENT_TAG_FILE")
 	prev=$cur
 	if [[ -n $cur ]]; then
@@ -477,37 +563,41 @@ deploy_tag() {
 		log "state: no current_tag yet, this is the first deploy on this host"
 	fi
 
-	log "step 4/9 pin the new tag"
+	log "step 4/10 pin the new tag"
 	write_env_tag "$tag"
 
-	log "step 5/9 database migration (wp core update-db)"
+	log "step 5/10 database migration (wp core update-db)"
 	migrate
 
-	log "step 6/9 container swap"
-	run_sh "$DC_STR up -d --no-build --remove-orphans"
+	log "step 6/10 container swap (renewing the anonymous /var/www/html volume)"
+	swap_containers
 
-	log "step 7/9 smoke check"
+	log "step 7/10 smoke check"
 	if smoke "$tag"; then
-		log "step 9/9 record success and prune images"
+		log "step 9/10 record success and prune images"
 		write_state "$CURRENT_TAG_FILE" "$tag"
 		prune_images "$tag" "$prev"
+		log "step 10/10 prune the anonymous volume left by the swap"
+		prune_volumes
 		log "=== DEPLOY OK env=$ENV tag=$tag ==="
 		return 0
 	fi
 
-	log "step 8/9 smoke check FAILED for $tag"
+	log "step 8/10 smoke check FAILED for $tag"
 	if [[ -z $prev ]]; then
 		log "=== DEPLOY FAILED, NO PREVIOUS TAG TO ROLL BACK TO ==="
 		return 1
 	fi
-	log "step 8/9 restoring previous tag $prev"
+	log "step 8/10 restoring previous tag $prev (renewing the anonymous /var/www/html volume)"
 	write_env_tag "$prev"
-	run_sh "$DC_STR up -d --no-build --remove-orphans"
+	swap_containers
 	if smoke "$prev"; then
 		# previous_tag is deliberately left at $prev rather than set to the
 		# bad tag, so a later `rollback` can never redeploy a tag that has
 		# just been proven broken.
 		write_state "$CURRENT_TAG_FILE" "$prev"
+		log "step 10/10 prune the anonymous volumes left by the swap and the rollback"
+		prune_volumes
 		log "=== DEPLOY FAILED, ROLLED BACK TO $prev ==="
 		return 1
 	fi

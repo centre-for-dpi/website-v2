@@ -7,7 +7,9 @@
 #
 # Usage:
 #   IMAGE_TAG=sha-<sha> docker compose \
-#     -f compose.yaml -f compose.production.yaml -f compose.shadow.yaml up -d
+#     -f compose.yaml -f compose.production.yaml -f compose.shadow.yaml up -d -V
+#   (-V renews the anonymous /var/www/html volume the base image declares;
+#    without it a second shadow run keeps serving the previous tag's files)
 #   curl -sS -H 'Host: <domain>' -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/
 #   docker compose -f ... -f compose.shadow.yaml down
 services:

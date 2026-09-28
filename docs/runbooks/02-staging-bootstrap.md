@@ -231,7 +231,7 @@ manifest inspect ghcr.io/centre-for-dpi/website-v2:sha-<sha>` confirms it).
 ssh -i cdpi-deploy-staging deploy@<host> deploy sha-<40-hex-sha>
 ```
 
-The host prints all nine steps. Expect `=== DEPLOY OK ...`.
+The host prints all ten steps. Expect `=== DEPLOY OK ...`.
 
 ## 11. Rewrite the URLs and switch off indexing
 

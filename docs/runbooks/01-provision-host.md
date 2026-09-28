@@ -203,4 +203,17 @@ sudo journalctl -t BREAKGLASS --since '5 min ago'
 rm -rf /tmp/deploy
 ```
 
+## 9. One rule for admins operating the stack by hand
+
+Admins have sudo and therefore `docker`. Use it for `ps`, `logs`, `exec` and
+the runbook's explicit `up -d db` / `run --rm` commands — but **never restart
+or redeploy `wordpress` with a bare `docker compose up -d`** (nor `restart`,
+nor `--force-recreate`). The `wordpress:*-apache` base image declares
+`VOLUME /var/www/html`; a plain `up -d` re-attaches the previous container's
+anonymous volume, so the old site files keep being served while the ENV (and
+the `cdpi-build` marker) say otherwise. `ssh deploy@<host> deploy <tag>` (or
+`rollback`) is the only supported path: it uses `--renew-anon-volumes` and
+prunes the orphaned volume afterwards. Details in `deploy/README.md`
+§ "The base image's anonymous volume".
+
 Next: **runbook 02** (staging) or **runbook 03** (production).

@@ -54,7 +54,7 @@ never set.
 |---|---|---|
 | `install.sh` | run from `/tmp/deploy/host/` | idempotent provisioning; `--check`, `--env`, `--admins-file`, `--seal-default-user` |
 | `cdpi-deploy` | `/usr/local/bin/cdpi-deploy` 0755 root | sshd `ForceCommand` wrapper, runs as `deploy`. Parses `SSH_ORIGINAL_COMMAND`, no `eval`, exits 126 on anything unexpected |
-| `cdpi-deploy-root` | `/usr/local/sbin/cdpi-deploy-root` 0750 root | the nine-step deploy, reached only via `sudo -n`. `flock`, `--dry-run` |
+| `cdpi-deploy-root` | `/usr/local/sbin/cdpi-deploy-root` 0750 root | the ten-step deploy, reached only via `sudo -n`. `flock`, `--dry-run`. **The only supported way to (re)start `wordpress`** — see "The base image's anonymous volume" below |
 | `cdpi-breakglass-notify` | `/usr/local/sbin/` 0750 root | `pam_exec` hook; alerts on every break-glass login |
 | `sudoers.d-cdpi-deploy` | `/etc/sudoers.d/cdpi-deploy` 0440 root | one command, no wildcard; `visudo -cf`-validated before it is moved into place |
 | `sshd_config.d-cdpi-keys.conf` | `/etc/ssh/sshd_config.d/01-cdpi-keys.conf` | root-owned `AuthorizedKeysFile` |
@@ -100,7 +100,43 @@ No `my.cnf`, no production/shadow overlays.
 
 ---
 
-## Two design choices worth knowing about
+## Three things worth knowing about
+
+### The base image's anonymous `/var/www/html` volume — never `up -d` by hand
+
+`wordpress:*-apache` declares `VOLUME /var/www/html`. Our image bakes the
+site into that path, but the declaration still makes Docker mount an
+**anonymous volume** there on the container's first start, seeded from the
+image. On a recreate — `docker compose up -d` for a new `IMAGE_TAG`, even
+with `--force-recreate` — compose **re-attaches the same anonymous volume**,
+so the container keeps serving the *old* docroot; only the ENV changes. The
+`cdpi-build` smoke marker is an ENV value, not a file, so it reports the new
+SHA while the old files are served.
+
+`cdpi-deploy-root` therefore swaps the container with
+`up -d --no-build --no-deps --renew-anon-volumes wordpress`, which creates a
+fresh anonymous volume seeded from the new image (scoped to `wordpress`
+because `-V` also force-recreates every service it selects — unscoped it
+would restart MySQL and Caddy on each deploy), follows it with a plain
+`up -d` for anything not yet running, and then removes the orphaned volume with
+`docker volume prune -f --filter label=com.docker.volume.anonymous` (step 10;
+anonymous and unreferenced only — `cdpi_uploads`, `cdpi_db_data`,
+`cdpi_caddy_data`, `cdpi_caddy_config` are named and never candidates).
+`docker compose run --rm` (the migration step) removes its container's
+anonymous volume itself.
+
+Consequences:
+
+- **A manual `docker compose up -d` without `-V` is not a valid redeploy**,
+  and neither is `restart` or `--force-recreate`. Use
+  `ssh deploy@<host> deploy <tag>` / `rollback`, which is the same code path
+  and the only supported one.
+- Do not "fix" this by mounting a bind or named volume at `/var/www/html`:
+  that would pin the docroot to whatever was copied in first and defeat
+  image-based deploys altogether. `uploads` is mounted *inside* it and is the
+  only persistent path by design.
+- Proven in PR #5 "Review fix 2": a file planted in `/var/www/html` survived
+  `--force-recreate` on the same volume id and was gone only with `-V`.
 
 ### One Caddyfile, snippets selected by environment variable
 
@@ -221,6 +257,12 @@ docker run --rm -v "$PWD":/w -w /w koalaman/shellcheck:stable \
 #    HTTP 200 on the installer page through the internal certificate,
 #    X-Robots-Tag present, Server header stripped, HTTP->HTTPS redirect,
 #    then `down -v`
+
+# 8. (Review fix 2) the root script run for real inside an isolated
+#    docker:dind daemon against two locally tagged placeholder images:
+#    deploy sha-<zeros>, plant a file in /var/www/html, deploy sha-<ones>;
+#    the planted file is gone, the served marker changes, and
+#    `docker volume ls -qf dangling=true` is empty afterwards. See the PR.
 ```
 
 What could **not** be exercised here, and is therefore WP5's job on the real

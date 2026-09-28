@@ -146,7 +146,11 @@ for ports 80/443, publishes the app on `127.0.0.1:8080` and disables WP cron.
 ```bash
 cd /opt/cdpi
 DC="docker compose -f compose.yaml -f compose.production.yaml -f compose.shadow.yaml"
-sudo IMAGE_TAG=sha-<sha> $DC up -d
+# -V (--renew-anon-volumes) is mandatory: the base image declares VOLUME
+# /var/www/html and a plain `up -d` would re-attach the previous shadow
+# run's anonymous volume, i.e. serve the previous tag's files. See
+# deploy/README.md § "The base image's anonymous volume".
+sudo IMAGE_TAG=sha-<sha> $DC up -d -V
 sudo $DC ps
 
 curl -sS -o /tmp/shadow.html -w '%{http_code}\n' \
