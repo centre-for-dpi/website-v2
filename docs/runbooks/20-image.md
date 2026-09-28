@@ -1,8 +1,8 @@
 # Runbook 20 — The container image
 
 Purpose: how the `cdpi/website-v2` image is built, what is baked into it,
-how to build and boot it locally, and which values are still placeholders
-awaiting the production discovery run (runbook 00).
+how to build and boot it locally, which values came from the production
+discovery run (runbook 00) and which are still placeholders.
 
 Related: `Dockerfile`, `docker/`, `composer.json`, `compose.dev.yaml`,
 `.github/workflows/release.yml`, ADR-004.
@@ -29,15 +29,30 @@ directories 755, files 644. The only path `www-data` can write is
 `DISALLOW_FILE_MODS` this is what makes the running container tamper-resistant:
 an in-place edit of the docroot cannot be made to stick past a restart.
 
-## 2. Placeholders awaiting the discovery run
+## 2. Values from the discovery run, and what is still a placeholder
 
-These are the exact lines to change once `scripts/host/discover.sh` output is
-in hand. Each is a one-line edit to a default; nothing else needs to move.
+Production discovery (2026-09-28) found WordPress core **7.0.4**, PHP
+**8.1.28**, and the theme installed at `wp-content/themes/cdpi-wp-theme/`.
+The Dockerfile ARG defaults now carry those values:
 
 ```dockerfile
-ARG WP_IMAGE_TAG=6.8-php8.2-apache      # -> <wp core version>-php<php major.minor>-apache
-ARG WP_CLI_IMAGE_TAG=cli-2.12.0-php8.2  # -> keep the php suffix in step with WP_IMAGE_TAG
-ARG THEME_SLUG=cdpi                     # -> `wp option get stylesheet` on production, verbatim
+ARG WP_IMAGE_TAG=7.0.4-php8.2-apache    # core 7.0.4 = production; PHP 8.2, see below
+ARG WP_CLI_IMAGE_TAG=cli-2.12.0-php8.2  # php suffix kept in step with WP_IMAGE_TAG
+ARG THEME_SLUG=cdpi-wp-theme            # = production's theme directory / `stylesheet` option
+```
+
+**Why PHP 8.2 when production runs 8.1:** `docker.io/library/wordpress`
+publishes no php8.1 variant of the 7.x images (`7.0.4-php8.1-apache` returns
+404 on Docker Hub; `7.0.4-php8.2-apache` exists) and PHP 8.1 is end-of-life.
+The core version is the value that must match production exactly (so
+`wp core update-db` is a no-op at cutover); the PHP minor version is not
+stored in the database. The theme was booted and exercised on PHP 8.2 in WP3
+(home, a post, a page, login, search) with no deprecation notices.
+
+Still placeholders, each a one-line edit once `scripts/host/discover.sh`
+reports production's `php -i` limits:
+
+```dockerfile
 ARG PHP_UPLOAD_MAX_FILESIZE=64M         # -> discover.sh "php.ini limits"
 ARG PHP_POST_MAX_SIZE=64M
 ARG PHP_MEMORY_LIMIT=256M
@@ -59,9 +74,10 @@ WordPress finds the active theme by directory name: the `stylesheet` (and
 `wp-content/themes/${THEME_SLUG}/`. **If `THEME_SLUG` does not equal
 production's `stylesheet` option, the site boots with no theme** (WordPress
 falls back to a default theme, which the image deliberately does not ship, so
-the front end renders raw). The current default `cdpi` is a guess. Set it from
-`discover.sh` output (`wp option get stylesheet`) and do not rename it later
-without a matching `wp theme activate` in the same deploy.
+the front end renders raw). The default `cdpi-wp-theme` is production's theme
+directory name as found on the host on 2026-09-28; confirm it against
+`wp option get stylesheet` on the production database before cutover, and do
+not rename it later without a matching `wp theme activate` in the same deploy.
 
 The value is also what the deploy smoke check implicitly tests: the
 stylesheet URL in the served page is
@@ -119,7 +135,7 @@ $DC run --rm --user www-data wordpress wp core install \
   --url=http://localhost:8080 --title='CDPI dev' \
   --admin_user=admin --admin_password=admin --admin_email=dev@example.invalid \
   --skip-email
-$DC run --rm --user www-data wordpress wp theme activate cdpi     # = THEME_SLUG
+$DC run --rm --user www-data wordpress wp theme activate cdpi-wp-theme   # = THEME_SLUG
 $DC run --rm --user www-data wordpress wp plugin activate --all
 $DC run --rm --user www-data wordpress wp rewrite structure '/%postname%/'
 $DC run --rm --user www-data wordpress wp core update-db
