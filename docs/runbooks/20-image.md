@@ -315,3 +315,16 @@ Append under `updates:`:
     commit-message:
       prefix: build
 ```
+
+## 9. Known issues
+
+Theme defects that are present in the image because they are present in the
+theme as checked in at 3e4208a. They are the vendor's (Think201) to fix, so
+none of them blocks a release, and none of them is a regression of the
+container build: production shows the same behaviour today. Expect to see
+them when booting locally with `WORDPRESS_DEBUG: "1"` (section 4).
+
+| Issue | Where | Effect | Owner |
+| --- | --- | --- | --- |
+| [#22](https://github.com/centre-for-dpi/website-v2/issues/22) Category and author archives return HTTP 500 | `archive.php:5`, `src/modules/blog/landing/listing.php:29` and `:50` use `Helper::getCodePath('modules/…')`, which resolves to `<theme>/modules/`, a directory that does not exist (the files are under `src/modules/`). | Every `/category/<slug>/` and `/author/<login>/` request is a PHP fatal (500), on production too (`https://cdpi.dev/category/uncategorized/`, 2026-09-28). | vendor (Think201) |
+| `banner_image` undefined array key | `src/blocks/page-blog-single/blog-single-banner/index.php:2` reads `$post['meta_fields']['banner_image']` without checking it exists. | `PHP Warning: Undefined array key "banner_image"` on every single post that has no banner image set; the page still renders with the fallback image. | vendor (Think201) |
