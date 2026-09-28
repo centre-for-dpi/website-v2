@@ -36,7 +36,7 @@ ARG GIT_SHA=unknown
 # ---------------------------------------------------------------------------
 # Stage 1: build the theme assets from source.
 # ---------------------------------------------------------------------------
-FROM node:22-bookworm-slim AS theme
+FROM node:26-bookworm-slim AS theme
 WORKDIR /theme
 
 # Dependencies first so they cache independently of source edits. NODE_ENV is
