@@ -1,7 +1,9 @@
 name: CI
 
 # Runs on every pull request (any target branch) and on pushes to main, so the
-# same two checks that gate a merge also confirm the merge commit itself.
+# checks that gate a merge also confirm the merge commit itself. Only `lint`
+# and `build` are required by the main branch ruleset (WP2); `image-theme-stage`
+# and `deploy-tooling` are advisory and are not listed there.
 # This workflow references no secret of any kind, and it deliberately uses the
 # plain pull-request trigger rather than the variant that runs against the base
 # repository with write access: a pull request from a fork must never be able to
@@ -146,3 +148,137 @@ jobs:
 
       - name: Check the webpack manifest
         run: bash scripts/ci/check-manifest.sh
+
+  # Builds the theme stage of the Dockerfile on pull requests only, so a change
+  # that breaks the container build fails here rather than on main after the
+  # merge. Nothing is pushed or loaded and no secret is referenced: the release
+  # workflow (push to main, tags) is the only place the image is published.
+  # The actions are pinned to the same SHAs as release.yml so the two builds
+  # cannot drift apart.
+  image-theme-stage:
+    name: image-theme-stage
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the theme stage
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: theme
+          push: false
+          load: false
+          build-args: |
+            GIT_SHA=${{ github.event.pull_request.head.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Static checks over deploy/ and scripts/: nothing here touches a host. Every
+  # tool runs from a pinned container so the verdict does not depend on what
+  # the runner image happens to ship.
+  deploy-tooling:
+    name: deploy-tooling
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: shellcheck deploy/host and scripts
+        env:
+          # Pinned release tag rather than :stable, so a new shellcheck release
+          # cannot change the verdict on an unrelated pull request.
+          SHELLCHECK_IMAGE: koalaman/shellcheck:v0.11.0
+        run: |
+          set -euo pipefail
+          # deploy/host/ mixes bash scripts (some without a .sh suffix, since
+          # they install as commands) with sshd, sudoers and admin list files,
+          # so scripts are selected by shebang rather than by name.
+          files=()
+          while IFS= read -r -d '' f; do
+            if head -c 64 "$f" | grep -q '^#!.*bash'; then files+=("$f"); fi
+          done < <(find deploy/host scripts -type f \
+            \( -path 'deploy/host/*' -o -name '*.sh' \) -print0 | sort -z)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No shell scripts found under deploy/host or scripts" >&2
+            exit 1
+          fi
+          docker pull --quiet "$SHELLCHECK_IMAGE" >/dev/null
+          docker run --rm -v "$PWD":/w -w /w "$SHELLCHECK_IMAGE" "${files[@]}"
+          echo "shellcheck ($SHELLCHECK_IMAGE): ${#files[@]} script(s) clean"
+          printf '  %s\n' "${files[@]}"
+
+      - name: Deploy wrapper parser self-test
+        run: |
+          set -uo pipefail
+          # 26 cases against the sshd ForceCommand wrapper, no root or sudo
+          # needed (CDPI_DEPLOY_DRY=1). Only the summary is shown on success.
+          out="$(bash deploy/host/test-cdpi-deploy.sh 2>&1)"
+          rc=$?
+          if [ "$rc" -ne 0 ]; then printf '%s\n' "$out"; exit "$rc"; fi
+          printf '%s\n' "$out" | tail -n 1
+
+      - name: Validate the compose overlays
+        env:
+          IMAGE_TAG: sha-0000000000000000000000000000000000000000
+        run: |
+          set -euo pipefail
+          # compose.yaml reads its env_file entries from ${CDPI_ETC:-/etc/cdpi},
+          # so a throwaway directory of the committed .example files stands in
+          # for the host's /etc/cdpi. No real value is involved.
+          export CDPI_ETC="$RUNNER_TEMP/etc-cdpi"
+          mkdir -p "$CDPI_ETC"
+          cp deploy/app.env.example   "$CDPI_ETC/app.env"
+          cp deploy/caddy.env.example "$CDPI_ETC/caddy.env"
+          cp deploy/db.env.example    "$CDPI_ETC/db.env"
+          cd deploy
+          docker compose -f compose.yaml -f compose.staging.yaml config -q
+          echo "staging overlay: ok"
+          docker compose -f compose.yaml -f compose.production.yaml config -q
+          echo "production overlay: ok"
+          docker compose -f compose.yaml -f compose.production.yaml -f compose.shadow.yaml config -q
+          # Shadow mode must start wordpress alone: caddy is parked in a
+          # profile that is never activated, so nothing contends for 80/443.
+          services="$(docker compose -f compose.yaml -f compose.production.yaml -f compose.shadow.yaml config --services)"
+          if [ "$services" != wordpress ]; then
+            echo "shadow overlay should expose only 'wordpress', got: $services" >&2
+            exit 1
+          fi
+          echo "shadow overlay: ok (services: $services)"
+
+      - name: Validate the Caddyfile in both TLS modes
+        run: |
+          set -euo pipefail
+          # The Caddy image is read from compose.yaml so the validator is the
+          # exact version that runs on the hosts, and the two cannot drift.
+          image="$(sed -n 's/^ *image: *\(caddy:[^ ]*\).*/\1/p' deploy/compose.yaml)"
+          if [ -z "$image" ]; then
+            echo "Could not read the caddy image tag from deploy/compose.yaml" >&2
+            exit 1
+          fi
+          docker pull --quiet "$image" >/dev/null
+          validate() {
+            # caddy validate logs a dozen JSON lines on success; show them only
+            # when the verdict is a failure.
+            local label=$1; shift
+            local out
+            if out="$(docker run --rm \
+              -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" "$@" \
+              "$image" caddy validate --config /etc/caddy/Caddyfile 2>&1)"; then
+              echo "$label: ok ($image)"
+            else
+              printf '%s\n' "$out"
+              echo "$label: caddy validate failed" >&2
+              return 1
+            fi
+          }
+          validate "staging (CADDY_TLS=internal, robots noindex)" \
+            -e SITE_HOST=localhost -e CADDY_TLS=internal -e CADDY_ENV=staging
+          validate "production (public certificates, no robots header)" \
+            -e SITE_HOST=cdpi.dev

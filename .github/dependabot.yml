@@ -1,7 +1,8 @@
-# Dependabot keeps the two things CI depends on from going stale: the commit
-# SHAs the workflows pin their actions to, and the npm build toolchain. Updates
-# arrive as ordinary pull requests, so they go through the same lint and build
-# checks as any other change.
+# Dependabot keeps four things from going stale: the commit SHAs the workflows
+# pin their actions to, the npm build toolchain, the image base tags in the
+# Dockerfile and the compose files, and the Composer plugin pins. Updates
+# arrive as ordinary pull requests, so they go through the same lint, build
+# and image checks as any other change.
 version: 2
 updates:
   # Rewrites the pinned SHA and the "# vX.Y.Z" comment together, which is the
@@ -51,3 +52,41 @@ updates:
           - "prettier"
           - "husky"
           - "lint-staged"
+
+  # Core and PHP upgrades: Dependabot rewrites the FROM lines in the
+  # Dockerfile. Note the ARG defaults (WP_IMAGE_TAG, WP_CLI_IMAGE_TAG) are what
+  # actually select the wordpress tag; review that both move together. Every
+  # bump is proven by image-theme-stage on the PR and by the release build on
+  # main.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: ["dependencies"]
+    commit-message:
+      prefix: build
+
+  # Host-side image pins in deploy/compose*.yaml (caddy, mysql). The
+  # deploy-tooling job validates the overlays and the Caddyfile against the
+  # bumped caddy tag, so a Caddy release that changes the config language is
+  # caught on the PR.
+  - package-ecosystem: docker
+    directory: /deploy
+    schedule:
+      interval: weekly
+      day: monday
+    labels: ["dependencies"]
+    commit-message:
+      prefix: deploy
+
+  # Plugin pins. Every bump is a PR that rebuilds the image, so a plugin
+  # update is reviewed and deployed like any other change (ADR-004).
+  - package-ecosystem: composer
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: ["dependencies"]
+    commit-message:
+      prefix: build
