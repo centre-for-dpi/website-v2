@@ -5,25 +5,33 @@
 # in the `plugins` stage) + WP-CLI, assembled on the official Apache image.
 #
 # Nothing here needs a secret. Every value below that depends on the production
-# host is a build ARG with a placeholder default and is marked "!! PLACEHOLDER";
-# scripts/host/discover.sh (runbook 00) supplies the real values, after which
-# each is a one-line change to the ARG default. See docs/runbooks/20-image.md.
+# host is a build ARG; the core version, PHP version and theme slug were set
+# from the production discovery run of 2026-09-28 (runbook 00). The php.ini
+# limits are still placeholders, marked "!! PLACEHOLDER", and are a one-line
+# change to the ARG default once discovered. See docs/runbooks/20-image.md.
 #
 # The ARGs before the first FROM are global: they are usable in FROM lines and
 # are re-declared (without a value) inside the stage that needs them.
 
-# !! PLACEHOLDER: production's core and PHP version (`wp core version`, `php -v`
-# from discover.sh). Must be an existing tag of docker.io/library/wordpress.
-ARG WP_IMAGE_TAG=6.8-php8.2-apache
+# Production discovery 2026-09-28: WordPress core 7.0.4 on PHP 8.1.28. The
+# image runs PHP 8.2, not 8.1: docker.io/library/wordpress publishes no php8.1
+# variant of the 7.x images (7.0.4-php8.1-apache does not exist) and PHP 8.1
+# is end-of-life. The theme was booted and exercised on PHP 8.2 in WP3 (home,
+# post, page, login, search) with no deprecation notices. The core version is
+# what must match production exactly, so `wp core update-db` is a no-op at
+# cutover. Must be an existing tag of docker.io/library/wordpress.
+ARG WP_IMAGE_TAG=7.0.4-php8.2-apache
 # WP-CLI is taken from the matching official cli image; keep the PHP suffix in
 # step with WP_IMAGE_TAG.
 ARG WP_CLI_IMAGE_TAG=cli-2.12.0-php8.2
-# !! PLACEHOLDER: the theme directory name. This MUST equal the `stylesheet`
-# option in the production database (`wp option get stylesheet`), because that
-# is the directory WordPress looks in for the active theme. A mismatch means
-# the site boots on no theme at all. discover.sh prints it.
-ARG THEME_SLUG=cdpi
-# !! PLACEHOLDER: php.ini limits (discover.sh prints production's values).
+# The theme directory name, from production discovery 2026-09-28
+# (wp-content/themes/cdpi-wp-theme/). This MUST equal the `stylesheet` option
+# in the production database (`wp option get stylesheet`), because that is
+# the directory WordPress looks in for the active theme. A mismatch means the
+# site boots on no theme at all.
+ARG THEME_SLUG=cdpi-wp-theme
+# !! PLACEHOLDER: php.ini limits. Still pending discovery (`php -i` limits on
+# the production host); these defaults are conservative guesses.
 ARG PHP_UPLOAD_MAX_FILESIZE=64M
 ARG PHP_POST_MAX_SIZE=64M
 ARG PHP_MEMORY_LIMIT=256M

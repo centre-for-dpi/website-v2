@@ -3,7 +3,9 @@
  * WordPress configuration for the cdpi/website-v2 container image.
  *
  * Derived from the official image's /usr/src/wordpress/wp-config-docker.php
- * (wordpress:6.8-php8.2-apache), with the CDPI additions marked below.
+ * (wordpress:7.0.4-php8.2-apache; the file is unchanged upstream between the
+ * 6.8 and 7.0.4 images apart from its header comment), with the CDPI
+ * additions marked below.
  *
  * Everything environment-specific comes from the environment (ADR-005):
  * the compose stack supplies it via `env_file: /etc/cdpi/app.env`. Every key
