@@ -9,10 +9,20 @@ require_once( 'src/redlof/index.php' );
 
 
 function theme_add_styles_and_scripts() {
-  $manifest = json_decode(
-    file_get_contents(__DIR__ . "/public/webpack.manifest.json"),
-    true
-  );
+  // The manifest is written by `npm run build` (public/webpack.manifest.json).
+  // Without it the theme has no CSS or JS, but a missing file must not take
+  // the whole site down: log a clear message and render unstyled instead.
+  $manifest_path = __DIR__ . "/public/webpack.manifest.json";
+  $manifest_json = is_readable($manifest_path) ? file_get_contents($manifest_path) : false;
+  $manifest = $manifest_json !== false ? json_decode($manifest_json, true) : null;
+
+  if (!is_array($manifest) || empty($manifest['main.css']) || empty($manifest['main.js'])) {
+    error_log(
+      'cdpi theme: public/webpack.manifest.json is missing, unreadable or lacks main.css/main.js; '
+      . 'theme assets not enqueued. Run `npm run build` (or rebuild the image).'
+    );
+    return;
+  }
 
 	wp_enqueue_style(
     'style',
@@ -273,3 +283,32 @@ function cdpiGlobalMomentumXlsxRows(array $countries): array {
     }, $countries));
 }
 
+/**
+ * Build marker (ADR-004 / ADR-007).
+ *
+ * CDPI_BUILD_SHA is set by the Dockerfile from the commit the image was built
+ * from. The deploy smoke check and the rollback runbook read this tag to
+ * confirm which build is actually serving the page.
+ */
+function cdpi_build_marker(): void {
+  $sha = getenv('CDPI_BUILD_SHA') ?: 'unknown';
+  echo '<meta name="cdpi-build" content="' . esc_attr($sha) . '">' . "\n";
+}
+add_action('wp_head', 'cdpi_build_marker', 1);
+
+/**
+ * Keep every non-production copy of the site out of search engines.
+ *
+ * WordPress reads WP_ENVIRONMENT_TYPE from the environment (set by the
+ * compose stack: local, development, staging or production). Anything but
+ * production gets `noindex, nofollow` both as the robots meta tag and as an
+ * X-Robots-Tag header, so feeds, downloads and other non-HTML responses are
+ * covered too.
+ */
+if (wp_get_environment_type() !== 'production') {
+  add_filter('wp_robots', 'wp_robots_no_robots');
+  add_filter('wp_headers', function (array $headers): array {
+    $headers['X-Robots-Tag'] = 'noindex, nofollow';
+    return $headers;
+  });
+}
