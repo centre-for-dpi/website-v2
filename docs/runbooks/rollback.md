@@ -41,7 +41,9 @@ there is no separate change ticket to raise. Two more things gate it:
 
 - the repo variable `PRODUCTION_DEPLOYS_ENABLED` must be `true` (set at
   cutover, runbook 04). Before that, a production dispatch validates the tag
-  and ends: the `deploy-production` job is skipped, nothing is contacted;
+  and ends: the `deploy-production` job is skipped, nothing is contacted.
+  Staging has the same switch, `STAGING_DEPLOYS_ENABLED` (runbook 02 §13);
+  a dispatch or merge with it unset skips `deploy-staging` the same way;
 - the environment's deployment branch policy: dispatch from `main` (the
   default) or a `v*` tag.
 

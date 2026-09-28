@@ -13,9 +13,12 @@ name: Release
 #   dispatch (`gh workflow run release.yml -f image_tag=… -f environment=…`)
 #          -> no build: deploy an existing tag to staging or production. This
 #             is the rollback and redeploy path (docs/runbooks/rollback.md).
-#             `production` waits for the environment's required reviewers and
-#             stays inert until the repo variable PRODUCTION_DEPLOYS_ENABLED
-#             is `true` (set at cutover, WP9).
+#             `production` waits for the environment's required reviewers.
+#
+# Each deploy job is skipped until its repo variable is `true`:
+# STAGING_DEPLOYS_ENABLED (end of the staging bootstrap, runbook 02) and
+# PRODUCTION_DEPLOYS_ENABLED (cutover, WP9). Until then a run stops after
+# `build` (push) or `validate` (dispatch) without contacting any host.
 #
 # Secrets and variables are read only inside jobs bound to an environment
 # (`build`, `staging`, `production`), each with the deployment branch policy
@@ -178,11 +181,14 @@ jobs:
   # Staging: every push run after a successful build, or a dispatch that
   # targets staging. `always()` lets the dispatch path run while `build` is
   # skipped; the result checks keep a failed build from deploying anything.
+  # Skipped (not failed) until the repo variable STAGING_DEPLOYS_ENABLED is
+  # `true`, which runbook 02 sets as the last step of the staging bootstrap.
   deploy-staging:
     name: deploy-staging
     needs: [validate, build]
     if: >-
       always() && !cancelled() &&
+      vars.STAGING_DEPLOYS_ENABLED == 'true' &&
       (
         (github.event_name == 'push' && needs.build.result == 'success') ||
         (github.event_name == 'workflow_dispatch' && inputs.environment == 'staging' && needs.validate.result == 'success')

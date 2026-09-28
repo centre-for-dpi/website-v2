@@ -179,9 +179,12 @@ to the host and sends `deploy <tag>`:
 | `gh workflow run release.yml -f image_tag=<tag> -f environment=staging` | `validate`, then `deploy-staging` | the tag you named (rollback or redeploy) |
 | `gh workflow run release.yml -f image_tag=<tag> -f environment=production` | `validate`, then `deploy-production` after a required reviewer approves | the tag you named |
 
-Production is never reached from a push, and the `deploy-production` job is
-skipped until the repository variable `PRODUCTION_DEPLOYS_ENABLED` is `true`
-(set at cutover, runbook 04).
+Production is never reached from a push. Each deploy job is skipped (not
+failed) until its repository variable is `true`: `STAGING_DEPLOYS_ENABLED`
+(last step of runbook 02, after the manual first deploy succeeds) and
+`PRODUCTION_DEPLOYS_ENABLED` (cutover, runbook 04). Until then a run stops
+after `build` or `validate` without contacting any host; clearing a flag
+pauses deploys to that environment.
 
 Both deploy jobs call the composite action `.github/actions/remote-deploy`:
 it writes the environment's `DEPLOY_SSH_KEY` to a 0600 file, pins the host

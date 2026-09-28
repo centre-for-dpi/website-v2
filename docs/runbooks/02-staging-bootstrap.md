@@ -259,7 +259,8 @@ gh run watch "$(gh run list --workflow release.yml -L 1 --json databaseId -q '.[
 Green means the runner reached the host over SSH with the pinned host key,
 the wrapper accepted the command, and the runner then saw the marker on
 `SITE_URL`. That is the WP6 acceptance test; a red run says which of the
-three it was.
+three it was. (If the run shows `deploy-staging` as *skipped*, step 13's
+`STAGING_DEPLOYS_ENABLED` is not set yet; set it and dispatch again.)
 
 ## 11. Rewrite the URLs and switch off indexing
 
@@ -331,6 +332,18 @@ IP-only was used.
 If the Elastic IP changes (it should not), update `DEPLOY_HOST`, `SITE_URL`
 and `DEPLOY_KNOWN_HOSTS` in the `staging` environment and the WordPress URLs
 (step 11) together.
+
+Finally, switch on automatic staging deploys. Until this **repository**
+variable is `true`, `release.yml` skips its `deploy-staging` job (the image
+still builds), so merges to `main` before this point never contact the host:
+
+```bash
+gh variable set STAGING_DEPLOYS_ENABLED --body true
+```
+
+Its production twin, `PRODUCTION_DEPLOYS_ENABLED`, is set at cutover
+(runbook 04). Unsetting either flag (or setting it to anything but `true`)
+pauses deploys to that environment without touching the workflow.
 
 Next: the next merge to `main` deploys itself to staging; `rollback.md`
 covers dispatching an older tag.
