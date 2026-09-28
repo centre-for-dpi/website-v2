@@ -11,7 +11,7 @@ Decision: ADR-004, "Retention policy".
 
 | Class | Rule |
 | --- | --- |
-| Untagged manifests | Deleted on every run, no age condition. |
+| Untagged manifests | Deleted once older than 1 day. |
 | `sha-<40hex>` tags | Deleted once older than `older_than_days` (default 90). |
 | `v<X.Y.Z>` release tags | Never deleted, at any age. |
 | Safety floor | The newest **10** `sha-` tagged versions always survive, whatever their age. |
@@ -54,11 +54,10 @@ Two consequences shape the workflow:
 
 - **`older-than` narrows every rule, including `delete-untagged`.** A single
   step with `older-than: 90 days` and `delete-untagged: true` would leave
-  untagged debris younger than 90 days in place for months. The policy wants
-  untagged manifests gone unconditionally, so the workflow runs **two steps**:
-  one with `older-than` for the `sha-` tag rule, one without it for the untagged
-  sweep. The tag pass runs first so anything it strands is mopped up in the same
-  run.
+  untagged debris younger than 90 days in place for months. The two classes have
+  different age thresholds — 90 days for `sha-` tags, 1 day for untagged debris
+  — so the workflow runs **two steps**, each with its own `older-than`. The tag
+  pass runs first so anything it strands is mopped up in the same run.
 - **With `delete-tags` set, `keep-n-tagged` applies only to the matched subset.**
   That is exactly the floor semantics we want: of the `sha-` tags older than the
   threshold, keep the newest 10 and delete the tail. (With `delete-tags` unset it

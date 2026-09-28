@@ -1,7 +1,7 @@
 name: GHCR retention
 
 # ADR-004 retention policy for ghcr.io/centre-for-dpi/website-v2:
-#   * untagged manifests      -> deleted (every run, no age condition)
+#   * untagged manifests      -> deleted once older than 1 day
 #   * sha-<40hex> tags        -> deleted once older than `older_than_days` (default 90)
 #   * v<X.Y.Z> release tags   -> never deleted
 #   * safety floor            -> the newest 10 sha- tagged versions always survive,
@@ -130,8 +130,15 @@ jobs:
           dry-run: ${{ steps.params.outputs.dry_run }}
 
       # Separate step because older-than narrows *every* rule in the action,
-      # including delete-untagged. Untagged manifests are pruned with no age
-      # condition, so they cannot share a step with the 90-day tag rule.
+      # including delete-untagged. Untagged manifests are pruned on their own
+      # (much shorter) age condition, so they cannot share a step with the
+      # 90-day tag rule.
+      #
+      # The 1-day grace period is a deliberate guard against a race with an
+      # in-flight release build: a multi-architecture image's platform
+      # manifests are pushed before the parent index that identifies them as
+      # children, so mid-push they are indistinguishable from orphaned debris.
+      # Untagged debris is never urgent, so a day's delay costs nothing.
       - name: Sweep untagged manifests
         if: steps.package.outputs.exists == 'true'
         uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
@@ -141,6 +148,7 @@ jobs:
           packages: ${{ env.PACKAGE_NAME }}
           delete-untagged: true
           exclude-tags: 'v*'
+          older-than: '1 day'
           validate: true
           dry-run: ${{ steps.params.outputs.dry_run }}
 
@@ -157,6 +165,7 @@ jobs:
             echo "| Trigger | \`${{ github.event_name }}\` |"
             echo "| Dry run | \`${{ steps.params.outputs.dry_run }}\` |"
             echo "| sha- tag age threshold | ${{ steps.params.outputs.days }} days |"
+            echo "| Untagged age threshold | 1 day |"
             echo "| Safety floor (newest sha- kept) | ${KEEP_N_TAGGED} |"
             echo "| Package exists | \`${{ steps.package.outputs.exists }}\` |"
             echo
