@@ -1,0 +1,44 @@
+# CODEOWNERS — paths that require an architect's review
+#
+# The `protect-main` ruleset sets `require_code_owner_review: true`, so a pull
+# request touching any path below cannot be merged until one of the owners
+# listed for that path has approved it. Everything not listed here needs the
+# normal one approving review from anyone with write access.
+#
+# These are the paths where a mistake is not caught by `lint` or `build`:
+# CI/CD definitions, the image and its runtime config, dependency pins, the
+# deploy scripts that run as root on the hosts, the break-glass log, and the
+# decision records themselves. The vendor (Think201, Write access) can propose
+# changes to them but cannot merge them alone.
+#
+# Individual logins, not a team: the repo owner is an organization member, not
+# an owner, so no GitHub team can be created (see ADR-002 as corrected in the
+# rollout plan — the ruleset bypass actor is OrganizationAdmin instead of a
+# break-glass team). Every owner listed must keep at least Write access or
+# GitHub silently ignores the rule.
+#
+# Later entries win: a file matched by several lines takes the owners of the
+# last matching line.
+
+# CI/CD workflows, this file, the PR template, Dependabot config
+/.github/                        @adammwaniki @justMuriithi
+
+# Image definition and its runtime configuration
+/Dockerfile                      @adammwaniki @justMuriithi
+/docker/                         @adammwaniki @justMuriithi
+
+# Host compose files, Caddy config, deploy scripts running as root
+/deploy/                         @adammwaniki @justMuriithi
+
+# Plugin pins — these decide what PHP code ships in the image
+/composer.json                   @adammwaniki @justMuriithi
+/composer.lock                   @adammwaniki @justMuriithi
+
+# CI helpers, host provisioning and the governance script itself
+/scripts/                        @adammwaniki @justMuriithi
+
+# The break-glass log and procedure
+/BREAKGLASS.md                   @adammwaniki @justMuriithi
+
+# Architecture decision records
+/docs/adr/                       @adammwaniki @justMuriithi
