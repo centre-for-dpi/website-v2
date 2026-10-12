@@ -27,7 +27,7 @@
             <ul class="approach-card__list mb-4">
               <li>Recommendations on DPI blocks different departments can build</li>
               <li>First use-cases and sectors to drive adoption</li>
-              <li>Aligning  and stakeholder engagement</li>
+              <li>Stakeholder alignment and engagement</li>
             </ul>
             <div class="approach-card__link">
               Learn more <i class="fa-solid fa-arrow-right ms-2"></i>
