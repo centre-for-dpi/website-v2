@@ -10,7 +10,7 @@
 
         <!-- Description -->
         <p class="publication-hero__desc">
-        Understanding DPI and it’s use cases through our various articles and publications.
+        Understanding DPI and its use cases through our various articles and publications.
         </p>
       </div>
     </div>
