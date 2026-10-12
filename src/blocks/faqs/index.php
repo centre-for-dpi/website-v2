@@ -67,7 +67,7 @@
             </h3>
             <div id="faqCollapseFour" class="accordion-collapse collapse" aria-labelledby="faqHeadingFour" data-bs-parent="#faqAccordion">
               <div class="accordion-body faq-item__answer">
-                <p>Yes. We have published over 150 implementation focused DPI articles, toolkits, and guides on our DPI Wiki.</p>
+                <p>Yes. We have published over 90 implementation focused DPI articles in English (200+ including Spanish & French), toolkits, and guides on our DPI Wiki.</p>
               </div>
             </div>
           </div>
