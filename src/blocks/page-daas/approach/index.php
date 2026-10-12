@@ -14,7 +14,7 @@
         <p class="daas-approach__subheading text-uppercase">Approach</p>
         <h2 class="daas-approach__title">The DaaS way</h2>
   <p class="daas-approach__p1">
-        Using robust open-source DPGs with pre-qualified technology service providers, and ready-to-deploy program and policy packages helps governments avoid design errors and reduce deployment time to weeks! This is the DPI-as-packaged Solution (DaaS) way!  
+        Using robust open-source DPGs with pre-qualified technology service providers, and ready-to-deploy program and policy packages helps governments avoid design errors and reduce deployment time! This is the DPI-as-packaged Solution (DaaS) way!  
         <span class="daas-approach__p1-note">Co-created and supported by Co-Develop Foundation.</span>
         </p>
 
