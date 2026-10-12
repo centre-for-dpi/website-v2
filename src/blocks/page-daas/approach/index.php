@@ -39,7 +39,8 @@
                         <img class="daas-approach__image" src=" <?php echo Helper::getImagePath('images/daas-approach2.jpeg'); ?>"
                                 alt="Legal Arrangements" loading="lazy">
                         <h3 class="text-uppercase">Legal Arrangements</h3>
-                        <p> Pre-negotiated legal contracts protecting sovereignty, aligned to global DPI safeguards
+                        <p> Pre-negotiated legal contracts protecting sovereignty, aligned to global DPI safeguards</p>
+<a class="daas-approach__link" href="https://cdpi.dev/wp-content/uploads/2026/10/Legal-Clauses_CDPI-comp.pdf" target="_blank" rel="noopener">View legal arrangements &rarr;</a>
 
                 </div>
 
@@ -143,7 +144,7 @@
         .daas-approach__single__card {
                 width: 100%;
                 max-width: 24.5rem;    /* 392px */
-                height: 26.875rem;     /* 430px */
+                min-height: 26.875rem;     /* 430px */
                 display: flex;
                 flex-direction: column;
                 text-align: left;
@@ -178,7 +179,20 @@
                 padding-right: 48px;
                 margin-bottom: 32px;
         }
+.daas-approach__link {
+        margin-top: auto;
+        padding: 0 48px 32px 32px;
+        font-family: "Outfit", system-ui, sans-serif;
+        font-weight: 500;
+        font-size: 15px;
+        color: #6564DB;
+        text-decoration: none;
+}
 
+.daas-approach__link:hover,
+.daas-approach__link:focus-visible {
+        text-decoration: underline;
+}
         .daas-approach__image {
                 width: 100%;
                 height: 11.25rem; /* 180px */
