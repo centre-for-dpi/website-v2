@@ -70,7 +70,7 @@ the DPI deployment',
         'title' => 'PRE-QUALIFIED
 IMPLEMENTATION PARTNERS
 ',
-        'description' => 'Pre-qualified partners for faster onboarding. Implementation is open to all experienced service providers and independent software vendors. Please reach out to us at hello@cdpi.dev',
+        'description' => 'Pre-qualified partners for faster onboarding. Implementation is open to all experienced service providers and independent software vendors. Please reach out to us at info@cdpi.dev',
     ],
 
    

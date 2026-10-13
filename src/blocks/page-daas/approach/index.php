@@ -14,7 +14,7 @@
         <p class="daas-approach__subheading text-uppercase">Approach</p>
         <h2 class="daas-approach__title">The DaaS way</h2>
   <p class="daas-approach__p1">
-        Using robust open-source DPGs with pre-qualified technology service providers, and ready-to-deploy program and policy packages helps governments avoid design errors and reduce deployment time to weeks! This is the DPI-as-packaged Solution (DaaS) way!  
+        Using robust open-source DPGs with pre-qualified technology service providers, and ready-to-deploy program and policy packages helps governments avoid design errors and reduce deployment time! This is the DPI-as-packaged Solution (DaaS) way!  
         <span class="daas-approach__p1-note">Co-created and supported by Co-Develop Foundation.</span>
         </p>
 
@@ -29,7 +29,8 @@
                         <img class="daas-approach__image" src=" <?php echo Helper::getImagePath('images/daas-approach1.jpeg'); ?>"
                                 alt="Technical Scope templates" loading="lazy">
                         <h3 class="text-uppercase">Technical Scope templates</h3>
-                        <p>Technical specifications in line with DPI principles and best practices, avoiding cloud / data / vendor lock-ins
+                        <p>Technical specifications in line with DPI principles and best practices, avoiding cloud / data / vendor lock-ins</p>
+<a class="daas-approach__link" href="https://cdpi.dev/wp-content/uploads/2026/10/DaaS-Technical-Scope-Template-for-DVC_v2.0-1.pdf" target="_blank" rel="noopener">View technical scope templates <i class="fa-solid fa-arrow-right ms-2" aria-hidden="true"></i></a>
 
                 </div>
 
@@ -40,7 +41,7 @@
                                 alt="Legal Arrangements" loading="lazy">
                         <h3 class="text-uppercase">Legal Arrangements</h3>
                         <p> Pre-negotiated legal contracts protecting sovereignty, aligned to global DPI safeguards</p>
-<a class="daas-approach__link" href="https://cdpi.dev/wp-content/uploads/2026/10/Legal-Clauses_CDPI-comp.pdf" target="_blank" rel="noopener">View legal arrangements &rarr;</a>
+<a class="daas-approach__link" href="https://cdpi.dev/wp-content/uploads/2026/10/Legal-Clauses_CDPI-comp.pdf" target="_blank" rel="noopener">View legal arrangements <i class="fa-solid fa-arrow-right ms-2" aria-hidden="true"></i></a>
 
                 </div>
 
@@ -183,8 +184,8 @@
         margin-top: auto;
         padding: 0 48px 32px 32px;
         font-family: "Outfit", system-ui, sans-serif;
-        font-weight: 500;
-        font-size: 15px;
+        font-weight: 400;
+        font-size: 0.875rem;
         color: #6564DB;
         text-decoration: none;
 }
