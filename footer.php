@@ -12,7 +12,7 @@
                   class="footer__logo" />
               </a>
             </div>
-            <p class="footer__copyright">© CDPI 2025</p>
+            <p class="footer__copyright">© CDPI <?php echo date('Y'); ?></p>
           </div>
 
           <div class="footer__partner">
