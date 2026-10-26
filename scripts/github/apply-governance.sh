@@ -39,6 +39,17 @@ RULESET_ENFORCEMENT="${RULESET_ENFORCEMENT:-evaluate}"
 # GitHub Actions is app (integration) id 15368; required_status_checks pins the
 # check to that app so a third party cannot post a passing "lint" status.
 ACTIONS_APP_ID="${ACTIONS_APP_ID:-15368}"
+# The git tag production pulls from (deploy/host/cdpi-deploy-theme `sync`).
+# Its ruleset is active from the start: only the Release workflow and org
+# admins may create, move or delete it. Nothing else ever needs to, so there
+# is no evaluate phase for this one. The workflow pushes the tag with the
+# write deploy key `production-tag` (runbook 03 §4), because GitHub refuses
+# the Actions app (integration 15368) as a bypass actor on a repository
+# ruleset in this organisation ("must be part of the ruleset source or owner
+# organization", HTTP 422, 2026-10-26); a deploy key is the bypass actor type
+# it does accept, and the key lives only in the `production` environment.
+PRODUCTION_TAG="${PRODUCTION_TAG:-production}"
+TAG_RULESET_NAME="${TAG_RULESET_NAME:-protect-production-tag}"
 ENVIRONMENTS="${ENVIRONMENTS:-build staging production}"
 
 DRY_RUN=0
@@ -93,6 +104,8 @@ Environment (defaults in parentheses):
   RULESET_NAME        (protect-main)
   RULESET_ENFORCEMENT (evaluate)               evaluate|disabled
   ACTIONS_APP_ID      (15368)
+  PRODUCTION_TAG      (production)             tag the production host pulls
+  TAG_RULESET_NAME    (protect-production-tag) always enforcement=active
 USAGE
 }
 
@@ -704,6 +717,71 @@ ruleset_report() {
 }
 
 # ---------------------------------------------------------------------------
+# (f2) Ruleset on the production tag
+# ---------------------------------------------------------------------------
+
+tag_ruleset_body() {
+    local out="$1"
+    cat >"$out" <<JSON
+{
+  "name": "$TAG_RULESET_NAME",
+  "target": "tag",
+  "enforcement": "active",
+  "bypass_actors": [
+    { "actor_id": 1, "actor_type": "OrganizationAdmin", "bypass_mode": "always" },
+    { "actor_type": "DeployKey", "bypass_mode": "always" }
+  ],
+  "conditions": {
+    "ref_name": { "include": ["refs/tags/$PRODUCTION_TAG"], "exclude": [] }
+  },
+  "rules": [
+    { "type": "creation" },
+    { "type": "update" },
+    { "type": "deletion" }
+  ]
+}
+JSON
+}
+
+step_tag_ruleset() {
+    section "(f2) Ruleset '$TAG_RULESET_NAME' on refs/tags/$PRODUCTION_TAG (ADR-004 amendment 2026-10-26)"
+
+    local id body="$TMPDIR_GOV/tag-ruleset.json"
+    tag_ruleset_body "$body"
+    id="$(api_get "repos/$REPO/rulesets" \
+        --jq "[.[] | select(.name == \"$TAG_RULESET_NAME\") | .id][0] // empty")"
+
+    if [ -n "$id" ]; then
+        local got want cmp
+        got="$TMPDIR_GOV/tag-ruleset-got.json"
+        want="$TMPDIR_GOV/tag-ruleset-want.json"
+        api_get "repos/$REPO/rulesets/$id" | jq "$RULESET_NORM_JQ" >"$got"
+        jq "$RULESET_NORM_JQ" "$body" >"$want"
+        cmp="$(jq -n --slurpfile w "$want" --slurpfile g "$got" \
+            '{want: $w[0], got: $g[0]}' | jq "$RULESET_SUBSET_JQ")"
+        if [ "$cmp" = "true" ]; then
+            already "ruleset $TAG_RULESET_NAME (id $id) enforcement=active, rules creation/update/deletion, bypass=OrganizationAdmin + DeployKey"
+            ruleset_report "$id"
+            return 0
+        fi
+        mutate "ruleset $TAG_RULESET_NAME (id $id) updated, enforcement=active" \
+            --method PUT "repos/$REPO/rulesets/$id" --input "$body"
+    else
+        mutate "ruleset $TAG_RULESET_NAME created, enforcement=active, bypass=OrganizationAdmin + DeployKey" \
+            --method POST "repos/$REPO/rulesets" --input "$body"
+    fi
+
+    [ "$DRY_RUN" -eq 1 ] && return 0
+    id="$(api_get "repos/$REPO/rulesets" \
+        --jq "[.[] | select(.name == \"$TAG_RULESET_NAME\") | .id][0] // empty")"
+    if [ -n "$id" ]; then
+        ruleset_report "$id"
+    else
+        warn "ruleset $TAG_RULESET_NAME still does not exist after the call above"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # (g) Summary
 # ---------------------------------------------------------------------------
 step_summary() {
@@ -752,6 +830,7 @@ main() {
     step_secret_scanning
     step_environments
     step_ruleset
+    step_tag_ruleset
     step_summary
 }
 

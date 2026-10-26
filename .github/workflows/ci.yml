@@ -224,6 +224,18 @@ jobs:
           if [ "$rc" -ne 0 ]; then printf '%s\n' "$out"; exit "$rc"; fi
           printf '%s\n' "$out" | tail -n 1
 
+      - name: Production checkout script self-test
+        run: |
+          set -uo pipefail
+          # The pull-based production script (cron `sync`, deploy, revert,
+          # rollback) against a throw-away bare origin and smoke stand-ins;
+          # no network, root or host needed. Only the summary is shown on
+          # success.
+          out="$(bash deploy/host/test-cdpi-deploy-theme.sh 2>&1)"
+          rc=$?
+          if [ "$rc" -ne 0 ]; then printf '%s\n' "$out"; exit "$rc"; fi
+          printf '%s\n' "$out" | tail -n 1
+
       - name: Validate the compose overlays
         env:
           IMAGE_TAG: sha-0000000000000000000000000000000000000000

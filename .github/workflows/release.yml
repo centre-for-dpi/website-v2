@@ -15,14 +15,23 @@ name: Release
 #             is the rollback and redeploy path (docs/runbooks/rollback.md).
 #             `production` waits for the environment's required reviewers.
 #
+# Staging is pushed to over SSH (ADR-008). Production is pulled: nothing can
+# SSH into it, so the approved `deploy-production` job moves the git tag
+# `production` to the released commit and the host's cron picks it up
+# (deploy/host/cdpi-deploy-theme; docs/runbooks/03-production-checkout.md;
+# ADR-004 amendment 2026-10-26). The `image_tag` input names the commit for
+# both: the image for staging, the git commit for production.
+#
 # Each deploy job is skipped until its repo variable is `true`:
 # STAGING_DEPLOYS_ENABLED (end of the staging bootstrap, runbook 02) and
-# PRODUCTION_DEPLOYS_ENABLED (cutover, WP9). Until then a run stops after
-# `build` (push) or `validate` (dispatch) without contacting any host.
+# PRODUCTION_DEPLOYS_ENABLED (end of runbook 03). Until then a run stops after
+# `build` (push) or `validate` (dispatch) without touching any host or tag.
 #
 # Secrets and variables are read only inside jobs bound to an environment
 # (`build`, `staging`, `production`), each with the deployment branch policy
-# main + v*.
+# main + v*. The `production` tag this workflow moves never triggers it:
+# the push trigger below matches `v*` tags only, and ci.yml runs on branches
+# only.
 on:
   push:
     branches: [main]
@@ -225,9 +234,24 @@ jobs:
 
   # Production: dispatch only, never from a push. The `production` environment
   # holds the run until a required reviewer approves (that approval is the
-  # audit trail for a rollback), and the job does not exist at all until the
-  # repo variable PRODUCTION_DEPLOYS_ENABLED is `true` (WP9 cutover). Until
-  # then a production dispatch validates the tag and ends there.
+  # audit trail for a release or a rollback), and the job does not exist at
+  # all until the repo variable PRODUCTION_DEPLOYS_ENABLED is `true` (runbook
+  # 03). Until then a production dispatch validates the tag and ends there.
+  #
+  # Pull-based: this job never contacts the host. It moves the git tag
+  # `production` to the released commit (the only write it makes) and then
+  # polls the public site until it serves that commit's marker. On the host,
+  # `cdpi-deploy-theme sync` runs from cron every minute, fetches, checks the
+  # commit is on main and the tree is clean, checks it out, smokes locally
+  # and reverts on failure.
+  #
+  # The tag is under the `protect-production-tag` ruleset (creation, update,
+  # deletion; bypass: org admins and deploy keys), so no Write-role account
+  # can release or roll back by moving it. GitHub does not accept the Actions
+  # app as a bypass actor here, so the push is made with the write deploy key
+  # `production-tag`, whose private half is the `production` environment
+  # secret PRODUCTION_TAG_SSH_KEY (runbook 03 §4). GITHUB_TOKEN stays
+  # read-only. The environment values read: SITE_URL, PRODUCTION_TAG_SSH_KEY.
   deploy-production:
     name: deploy-production
     needs: [validate]
@@ -244,21 +268,142 @@ jobs:
     concurrency:
       group: deploy-production
       cancel-in-progress: false
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
-      - name: Check out the composite action
+      - name: Check out main with its history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sparse-checkout: .github/actions
+          ref: main
+          fetch-depth: 0
 
-      - name: Deploy and verify
-        uses: ./.github/actions/remote-deploy
-        with:
-          environment: production
-          host: ${{ vars.DEPLOY_HOST }}
-          user: ${{ vars.DEPLOY_USER }}
-          known_hosts: ${{ vars.DEPLOY_KNOWN_HOSTS }}
-          ssh_key: ${{ secrets.DEPLOY_SSH_KEY }}
-          site_url: ${{ vars.SITE_URL }}
-          smoke_ca_cert: ${{ vars.SMOKE_CA_CERT }}
-          image_tag: ${{ inputs.image_tag }}
+      - name: Resolve the release commit and check it is on main
+        id: resolve
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: |
+          set -euo pipefail
+          if [[ ! $IMAGE_TAG =~ ^(sha-[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::image_tag '$IMAGE_TAG' is not sha-<40 hex> or vX.Y.Z"; exit 1
+          fi
+          if [[ ! $SITE_URL =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
+            echo "::error::SITE_URL must be https://<host>[:port] with no path (production environment variable), got '$SITE_URL'"; exit 1
+          fi
+          git fetch --quiet --force origin \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/tags/*:refs/tags/*'
+          if [[ $IMAGE_TAG == sha-* ]]; then
+            sha=${IMAGE_TAG#sha-}
+            git cat-file -e "$sha^{commit}" 2>/dev/null ||
+              { echo "::error::commit $sha does not exist in this repository"; exit 1; }
+          else
+            sha=$(git rev-parse --verify --quiet "refs/tags/$IMAGE_TAG^{commit}") ||
+              { echo "::error::tag $IMAGE_TAG does not exist in this repository"; exit 1; }
+          fi
+          # The host refuses anything not reachable from origin/main; refuse
+          # here first so the tag never points at an unreviewed commit.
+          if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
+            echo "::error::commit $sha is not reachable from main; only merged commits can be released"; exit 1
+          fi
+          prev=$(git rev-parse --verify --quiet 'refs/tags/production^{commit}' || echo none)
+          echo "release $IMAGE_TAG -> commit $sha (production tag was $prev)"
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+          echo "prev=$prev" >>"$GITHUB_OUTPUT"
+
+      - name: Move the production tag
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+          TAG_SSH_KEY: ${{ secrets.PRODUCTION_TAG_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z $TAG_SSH_KEY ]]; then
+            echo "::error::The production environment has no PRODUCTION_TAG_SSH_KEY secret (the write deploy key that may move the production tag; runbook 03 §4)"
+            exit 1
+          fi
+          umask 077
+          # printf, not echo: the key never goes through a command line.
+          printf '%s\n' "$TAG_SSH_KEY" >"$RUNNER_TEMP/tag_key"
+          ssh-keygen -y -f "$RUNNER_TEMP/tag_key" >/dev/null || {
+            echo "::error::PRODUCTION_TAG_SSH_KEY is not a readable private key"; exit 1; }
+          # GitHub's SSH host keys, from its API over TLS, so the push host is
+          # pinned rather than trusted on first use.
+          curl -sS --max-time 20 https://api.github.com/meta |
+            jq -r '.ssh_keys[] | "github.com " + .' >"$RUNNER_TEMP/github_known_hosts"
+          [[ -s $RUNNER_TEMP/github_known_hosts ]] || {
+            echo "::error::Could not fetch GitHub's SSH host keys from api.github.com/meta"; exit 1; }
+
+          # Annotated, with the run id in the message: every approved dispatch
+          # is a distinct tag object, so the host can tell a re-release of the
+          # same commit from the tag it already tried (see
+          # deploy/host/cdpi-deploy-theme, `sync`).
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            tag --force --annotate \
+              --message "release $IMAGE_TAG ($SHA) dispatched by $GITHUB_ACTOR, run $GITHUB_RUN_ID" \
+              production "$SHA"
+          GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/tag_key -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=$RUNNER_TEMP/github_known_hosts -o StrictHostKeyChecking=yes" \
+            git push --force --quiet "git@github.com:$GITHUB_REPOSITORY.git" refs/tags/production
+          echo "production tag now points at $SHA"
+
+      - name: Remove the deploy key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/tag_key" "$RUNNER_TEMP/github_known_hosts"
+
+      - name: Wait for production to serve the release
+        id: smoke
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          PREV: ${{ steps.resolve.outputs.prev }}
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: |
+          set -euo pipefail
+          site_url=${SITE_URL%/}
+          echo "Expecting HTTP 200 and <meta name=\"cdpi-build\" content=\"$SHA\"> from $site_url/ within 8 minutes"
+          body=$RUNNER_TEMP/smoke_body
+          for attempt in $(seq 1 32); do
+            code=$(curl -sS --max-time 20 -o "$body" -w '%{http_code}' "$site_url/" 2>"$RUNNER_TEMP/smoke_err") || {
+              code=000; : >"$body"; }
+            marker=$(grep -o -m1 'name="cdpi-build" content="[0-9a-f]\{40\}"' "$body" 2>/dev/null |
+              grep -o '[0-9a-f]\{40\}' || true)
+            if [[ $code == 200 && $marker == "$SHA" ]]; then
+              echo "smoke: OK on attempt $attempt, HTTP 200, marker $marker"
+              echo "marker=$marker" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "smoke: attempt $attempt/32 HTTP $code marker=${marker:-none}$( [[ $code == 000 ]] && printf ' (%s)' "$(cat "$RUNNER_TEMP/smoke_err")" )"
+            sleep 15
+          done
+          echo "::error::production did not pick up the release within 8 minutes: $site_url/ is not serving HTTP 200 with marker $SHA. Check ~/.local/state/cdpi-deploy/cron.log and deploy.log on the host (cdpi-deploy-theme status). The production tag now points at $SHA; previously it was $PREV. A failed smoke on the host reverts the checkout by itself and is not retried until the tag moves: re-dispatch to try again, or dispatch $PREV to roll back."
+          exit 1
+
+      - name: Job summary
+        if: always()
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+          PREV: ${{ steps.resolve.outputs.prev }}
+          SITE_URL: ${{ vars.SITE_URL }}
+          MARKER: ${{ steps.smoke.outputs.marker }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ -n $MARKER ]]; then serving="\`$MARKER\`"; else serving="_not verified_"; fi
+          if [[ $PREV == none || -z $PREV ]]; then
+            rollback="_none: first release through the pipeline_"
+          else
+            rollback="\`gh workflow run release.yml -f image_tag=sha-$PREV -f environment=production\`"
+          fi
+          {
+            echo "## Deploy to production"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Release | \`$IMAGE_TAG\` |"
+            echo "| Production tag moved to | \`${SHA:-?}\` |"
+            echo "| Previous tag target | \`${PREV:-?}\` |"
+            echo "| Serving commit | $serving |"
+            echo "| URL | $SITE_URL |"
+            echo "| Smoke | $SMOKE_OUTCOME |"
+            echo "| Rollback | $rollback |"
+          } >>"$GITHUB_STEP_SUMMARY"
