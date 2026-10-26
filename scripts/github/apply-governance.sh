@@ -29,6 +29,12 @@ REPO="${REPO:-centre-for-dpi/website-v2}"
 VENDOR_LOGINS="${VENDOR_LOGINS:-bandekarkunal}"
 # Required reviewers on the production environment.
 PROD_REVIEWERS="${PROD_REVIEWERS:-adammwaniki justMuriithi}"
+# Whether the person who dispatched a production deployment may also approve
+# it (GitHub's prevent_self_review). Off by default, decided 2026-10-26: with
+# one active architect the dispatcher must be able to approve the release, and
+# both PROD_REVIEWERS stay required reviewers either way. Set it to true once
+# a second architect is routinely available to approve releases.
+PROD_PREVENT_SELF_REVIEW="${PROD_PREVENT_SELF_REVIEW:-false}"
 # Accounts legitimately holding Admin. Any other admin is reported each run,
 # which is the recurring audit ADR-002 asks for.
 ARCHITECT_LOGINS="${ARCHITECT_LOGINS:-adammwaniki justMuriithi vvujjini kamyachandra}"
@@ -100,6 +106,7 @@ Environment (defaults in parentheses):
   REPO                (centre-for-dpi/website-v2)
   VENDOR_LOGINS       (bandekarkunal)          space separated
   PROD_REVIEWERS      (adammwaniki justMuriithi)
+  PROD_PREVENT_SELF_REVIEW (false)             true|false; may the dispatcher approve
   ARCHITECT_LOGINS    (adammwaniki justMuriithi vvujjini kamyachandra)
   RULESET_NAME        (protect-main)
   RULESET_ENFORCEMENT (evaluate)               evaluate|disabled
@@ -422,7 +429,7 @@ env_desired_body() {
         cat >"$out" <<JSON
 {
   "wait_timer": 0,
-  "prevent_self_review": true,
+  "prevent_self_review": $PROD_PREVENT_SELF_REVIEW,
   "reviewers": [$reviewers],
   "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true }
 }
@@ -440,6 +447,11 @@ JSON
 
 step_environments() {
     section "(e) Environments build / staging / production (ADR-007)"
+
+    case "$PROD_PREVENT_SELF_REVIEW" in
+    true | false) ;;
+    *) die "PROD_PREVENT_SELF_REVIEW must be true or false (got '$PROD_PREVENT_SELF_REVIEW')" ;;
+    esac
 
     local name body cur exists dbp_ok want_rev got_rev psr
     for name in $ENVIRONMENTS; do
@@ -462,10 +474,10 @@ step_environments() {
             want_rev="$(jq -r '[.reviewers[]? | .id] | sort | @csv' "$body")"
 
             if [ "$dbp_ok" = "true" ] && [ "$got_rev" = "$want_rev" ] &&
-                { [ "$name" != "production" ] || [ "$psr" = "true" ]; }; then
+                { [ "$name" != "production" ] || [ "$psr" = "$PROD_PREVENT_SELF_REVIEW" ]; }; then
                 already "environment $name (branch policy custom, reviewers [$got_rev], prevent_self_review=$psr)"
             else
-                mutate "environment $name: reviewers [$got_rev]->[$want_rev], custom branch policy, prevent_self_review" \
+                mutate "environment $name: reviewers [$got_rev]->[$want_rev], custom branch policy, prevent_self_review=$psr->$(jq -r '.prevent_self_review // false' "$body")" \
                     --method PUT "repos/$REPO/environments/$name" --input "$body"
             fi
         else

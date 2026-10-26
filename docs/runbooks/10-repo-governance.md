@@ -59,6 +59,7 @@ All via environment variables, all with defaults:
 | `REPO` | `centre-for-dpi/website-v2` | |
 | `VENDOR_LOGINS` | `bandekarkunal` | Space separated. Third-party accounts that must hold Write |
 | `PROD_REVIEWERS` | `adammwaniki justMuriithi` | Logins; the script resolves them to numeric ids |
+| `PROD_PREVENT_SELF_REVIEW` | `false` | `true` or `false`. Whether the dispatcher of a production deployment may approve it; see section 4(e) |
 | `ARCHITECT_LOGINS` | `adammwaniki justMuriithi vvujjini kamyachandra` | Admins not on this list are reported every run |
 | `RULESET_NAME` | `protect-main` | |
 | `RULESET_ENFORCEMENT` | `evaluate` | `evaluate` or `disabled`. `active` is rejected here — use `--activate` |
@@ -152,7 +153,7 @@ GET  /repos/{REPO}/environments/{name}/deployment-branch-policies   (verify)
 `production`:
 
 ```json
-{"wait_timer":0,"prevent_self_review":true,
+{"wait_timer":0,"prevent_self_review":false,
  "reviewers":[{"type":"User","id":160830609},{"type":"User","id":44572764}],
  "deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
 ```
@@ -170,8 +171,17 @@ the vendor has Write, so they can open such a branch. Putting every secret in an
 environment with a deployment branch policy of `main` + tags `v*` means a PR
 branch cannot reach them at all, regardless of what a workflow asks for.
 
-`prevent_self_review: true` on `production` means the person who triggered the
-deployment cannot be the one who approves it.
+`prevent_self_review` on `production` decides whether the person who
+dispatched the deployment may be the one who approves it. It is **`false`**
+by default (decision of 2026-10-26): with one active architect, the person
+dispatching a production release must be able to approve it, otherwise every
+release would need an admin bypass. Both `adammwaniki` and `justMuriithi`
+remain required reviewers either way, so an approval is still recorded on
+every production run. To turn it on later, once a second architect routinely
+approves releases, run the script with `PROD_PREVENT_SELF_REVIEW=true` (and
+change the default in the script in the same PR, or the next plain run turns
+it off again). The script compares the live value with the desired one, so
+either setting converges and reruns stay idempotent.
 
 ### (f) Ruleset on the default branch — ADR-002, ADR-009
 
@@ -303,7 +313,7 @@ on 2026-09-27:
 | Ruleset `protect-main` | id **24081976**, **`enforcement: evaluate`**, rules `deletion`, `non_fast_forward`, `pull_request`, `required_status_checks`, bypass `OrganizationAdmin/always`, refs `~DEFAULT_BRANCH` |
 | Ruleset `protect-production-tag` | **not yet created** (2026-10-26; the agent session was not allowed to grant a bypass). Step (f2) of the script creates it with **`enforcement: active`**, target `tag`, rules `creation`, `update`, `deletion`, bypass `OrganizationAdmin/always` + `DeployKey/always`, refs `refs/tags/production`. Run `scripts/github/apply-governance.sh` (after `--check`), then record the id here. GitHub refused the Actions app (integration 15368) as a bypass actor: *"Actor GitHub Actions integration must be part of the ruleset source or owner organization"* (HTTP 422), which is why the Release workflow moves the tag with the write deploy key `production-tag` instead of `GITHUB_TOKEN` (runbook 03 §4). |
 | Environments | `build`, `staging`, `production` — all `custom_branch_policies: true`, each with branch `main` + tag `v*` |
-| `production` reviewers | `adammwaniki`, `justMuriithi`, `prevent_self_review: true` |
+| `production` reviewers | `adammwaniki`, `justMuriithi`, `prevent_self_review: false` (default since 2026-10-26, so the dispatcher may approve; was `true`. The next governance run applies it; `PROD_PREVENT_SELF_REVIEW=true` turns it back on) |
 | Workflow token | `read`, `can_approve_pull_request_reviews: false` |
 | Fork PR approval | `all_external_contributors` |
 | Secret scanning | `enabled`; push protection `enabled` |
@@ -409,7 +419,7 @@ cleared them.
 
   ```bash
   gh api --method PUT repos/centre-for-dpi/website-v2/environments/production \
-    -F can_admins_bypass=false -F prevent_self_review=true \
+    -F can_admins_bypass=false -F prevent_self_review=false \
     -F 'reviewers[][type]=User' -F 'reviewers[][id]=160830609' \
     -F 'reviewers[][type]=User' -F 'reviewers[][id]=44572764'
   ```
@@ -461,6 +471,17 @@ PROD_REVIEWERS="adammwaniki justMuriithi someoneElse" \
 
 The script resolves each login to a numeric id itself. Make the same change to
 the default in the script and commit it, or the next plain run reverts it.
+
+**Requiring a second person to approve production deploys** (the dispatcher
+can no longer approve their own run):
+
+```bash
+PROD_PREVENT_SELF_REVIEW=true ./scripts/github/apply-governance.sh --check
+PROD_PREVENT_SELF_REVIEW=true ./scripts/github/apply-governance.sh
+```
+
+As with reviewers, change the default in the script and commit it, or the next
+plain run sets it back to `false`.
 
 **Adding or removing an architect** (changes only the audit warning):
 `ARCHITECT_LOGINS="..." ./scripts/github/apply-governance.sh`.
