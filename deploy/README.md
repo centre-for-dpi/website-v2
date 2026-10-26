@@ -56,6 +56,14 @@ the repo, values never).
 validation can point them at a throwaway directory. On a host `CDPI_ETC` is
 never set.
 
+**No `$` in any value of the compose-read files** (`app.env`, `caddy.env`,
+`db.env`). Compose interpolates `$name` inside `env_file` values and replaces
+an undefined name with nothing, printing `The "name" variable is not set` on
+every compose call; a WordPress salt from api.wordpress.org contains `$` and
+was silently truncated on the first staging bootstrap. `$$` escapes one
+literal `$`; the `.example` files carry `$`-free generators, and
+`grep -n '\$' /etc/cdpi/*.env` must print nothing.
+
 ### Host scripts and configuration — `deploy/host/`
 
 | File | Installs as | Notes |
@@ -163,6 +171,18 @@ directive". And `header X-Robots-Tag {$CADDY_ROBOTS:""}` would emit an *empty*
 at startup (`File to import not found: tls_bogus`), which is the behaviour you
 want: a typo must not silently publish staging to search engines or silently
 skip TLS.
+
+The global options block sets `default_sni {$SITE_HOST}`. RFC 6066 forbids an
+IP literal in SNI, so in IP-only mode a client that obeys it (curl 8.5 on
+Ubuntu 24.04, `openssl s_client` without `-servername`) sends no SNI at all,
+Caddy cannot pick a certificate, and the handshake dies with
+`tlsv1 alert internal error` even though `--cacert` is right. `default_sni`
+makes Caddy serve `SITE_HOST`'s certificate to such clients. It is valid in
+both TLS modes and harmless with a hostname: a no-SNI client gets the only
+certificate there is. Verified with `caddy adapt` (both modes carry
+`"default_sni"` in the TLS connection policy) and end to end against a Caddy
+running the internal CA for `127.0.0.1`: `openssl s_client -noservername` and
+curl 8.5 both complete, where they got alert 80 before.
 
 ### Shadow mode parks Caddy in an inactive profile
 
