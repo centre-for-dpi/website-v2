@@ -291,7 +291,14 @@ function cdpiGlobalMomentumXlsxRows(array $countries): array {
  * confirm which build is actually serving the page.
  */
 function cdpi_build_marker(): void {
-  $sha = getenv('CDPI_BUILD_SHA') ?: 'unknown';
+  $sha = getenv('CDPI_BUILD_SHA') ?: '';
+  if ($sha === '') {
+    // Checkout-mode production (ADR-004 amendment 2026-10-26): the deploy
+    // script writes the checked-out commit to .cdpi-build in the theme root.
+    $file = __DIR__ . '/.cdpi-build';
+    $from_file = is_readable($file) ? trim((string) file_get_contents($file)) : '';
+    $sha = preg_match('/^[0-9a-f]{40}$/', $from_file) === 1 ? $from_file : 'unknown';
+  }
   echo '<meta name="cdpi-build" content="' . esc_attr($sha) . '">' . "\n";
 }
 add_action('wp_head', 'cdpi_build_marker', 1);

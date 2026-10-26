@@ -3,3 +3,5 @@ node_modules/
 vendor/
 .env
 *.local
+# Written on checkout-mode production by deploy/host/cdpi-deploy-theme
+.cdpi-build

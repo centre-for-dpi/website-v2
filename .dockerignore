@@ -24,3 +24,6 @@ public/webpack.manifest.json
 **/.DS_Store
 compose*.yaml
 vendor
+# Written on checkout-mode production by deploy/host/cdpi-deploy-theme;
+# the image gets its marker from CDPI_BUILD_SHA instead.
+.cdpi-build
