@@ -18,10 +18,22 @@
 # startup with "import: no snippet named tls_<value>", which is the
 # intended behaviour: a typo must not silently publish staging to search
 # engines or silently skip TLS.
+#
+# Global options (must be the first block). default_sni: a client that
+# sends no SNI gets SITE_HOST's certificate instead of a failed handshake.
+# RFC 6066 forbids an IP literal in SNI, so in IP-only mode clients that
+# obey it (curl 8.5, `openssl s_client` without -servername) send none,
+# Caddy cannot select a certificate and answers "tlsv1 alert internal
+# error" even with the right --cacert (seen on the first staging deploy).
+# Valid in both modes; with a hostname it is harmless, a no-SNI client just
+# gets the only certificate there is.
+{
+	default_sni {$SITE_HOST}
+}
 
 (tls_internal) {
 	# Staging, IP-only mode. Admins and the pipeline trust the root that
-	# install.sh / the bootstrap runbook exports to /opt/cdpi/caddy-root.crt.
+	# runbook 02 §8 exports to /opt/cdpi/caddy-root.crt.
 	tls internal
 }
 

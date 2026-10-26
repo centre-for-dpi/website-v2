@@ -24,7 +24,7 @@ EIP allocation is pending; do not stop/start the instance in that case).
 | `SITE_HOST` | `staging.<domain>` | the Elastic IP |
 | `CADDY_TLS` | empty | `internal` |
 | Certificate | Let's Encrypt, HTTP-01 on port 80 | Caddy's local CA |
-| `SMOKE_CA_CERT` | empty | `/opt/cdpi/caddy-root.crt` |
+| `SMOKE_CA_CERT` | empty | **empty for the first deploy**, then `/opt/cdpi/caddy-root.crt` (step 8; the file exists only after Caddy's first run) |
 | Extra work | a DNS A record, TTL 300, **no CDN in front** | export and distribute the Caddy root (step 8) |
 
 Everything else is identical. WordPress stores the URL in the database, so in
@@ -66,16 +66,22 @@ chown root:root app.env caddy.env db.env deploy.env
 ls -l /etc/cdpi
 ```
 
-Generate the staging salts fresh — do **not** reuse production's:
+**No `$` in any value.** docker compose interpolates `$name` inside `env_file`
+values: an undefined name becomes empty and every compose call prints
+`The "name" variable is not set`. Salts from api.wordpress.org contain `$` and
+were silently truncated on the first staging bootstrap, so do not use that
+service. Generate the staging salts fresh (do **not** reuse production's) with
+this loop, which prints the eight lines ready to paste into `app.env` and
+cannot produce a `$`:
 
 ```bash
-curl -s https://api.wordpress.org/secret-key/1.1/salt/
+for k in AUTH_KEY SECURE_AUTH_KEY LOGGED_IN_KEY NONCE_KEY \
+         AUTH_SALT SECURE_AUTH_SALT LOGGED_IN_SALT NONCE_SALT; do
+  printf 'WORDPRESS_%s=%s\n' "$k" "$(openssl rand -base64 48 | tr -d '/+=')"
+done
 ```
 
-That prints eight PHP `define()` lines; the value inside the second pair of
-quotes on each line goes into the matching `WORDPRESS_*` key in `app.env`.
-
-Generate the database passwords:
+Generate the database passwords the same way, one call per password:
 
 ```bash
 openssl rand -base64 30 | tr -d '/+='
@@ -89,7 +95,15 @@ said otherwise).
 
 `deploy.env`: `ENV=staging`, `DB_MODE=container`,
 `COMPOSE_FILES="compose.yaml compose.staging.yaml"`, and `SITE_HOST` /
-`SMOKE_CA_CERT` per the table in step 1.
+`SMOKE_CA_CERT` per the table in step 1 (IP-only mode: `SMOKE_CA_CERT` stays
+empty until step 8).
+
+Finally confirm that no value carries a `$` (`$$` is the escape for a literal
+one, should a value ever need it):
+
+```bash
+grep -n '\$' /etc/cdpi/*.env    # expect no output
+```
 
 ## 4. Registry credentials
 
@@ -170,11 +184,35 @@ ssh -i cdpi-deploy-staging deploy@<host>               # refused, no shell
 
 Keep the private key file until step 13: steps 10 and 12 use it.
 
-## 7. First boot of the stack
+## 7. What the first deploy looks like
 
-The image does not exist on the host yet, so bring up only the database and
-Caddy groundwork by doing a real first deploy (step 10) — or, to get the Caddy
-root certificate early in IP-only mode, start Caddy alone:
+The image does not exist on the host yet; the first real `deploy` in step 10
+is what starts the stack. There is nothing to boot by hand first.
+
+**IP-only mode, read before step 10.** Caddy's local CA, and with it the root
+certificate the smoke check verifies against, exists only after Caddy has run
+once. So the first `deploy` runs through backup, pull, migration and the
+container swap, and then fails at the smoke step:
+
+```
+step 7/10 smoke check
+smoke: attempt 1/12 HTTP 000
+...
+smoke: attempt 12/12 HTTP 000
+step 8/10 smoke check FAILED for sha-...
+no previous tag: the containers are left running as deployed; ...
+=== DEPLOY FAILED, NO PREVIOUS TAG TO ROLL BACK TO ===
+```
+
+That is expected. The stack is left running, Caddy has now generated its
+root, and step 8 exports it. Keep `SMOKE_CA_CERT` **empty** in `deploy.env`
+until then: if it points at a file that does not exist yet,
+`cdpi-deploy-root` refuses to start at all, before the backup, with a message
+saying so. The second `deploy` in step 10 then ends `DEPLOY OK`.
+
+Subdomain mode has no such detour: the first deploy ends `DEPLOY OK`.
+
+If you want the database up before step 10 (step 9 imports into it):
 
 ```bash
 cd /opt/cdpi
@@ -183,7 +221,8 @@ sudo IMAGE_TAG=unused docker compose -f compose.yaml -f compose.staging.yaml up 
 
 ## 8. IP-only mode: export and distribute the Caddy root
 
-After Caddy has run once (i.e. after the first deploy in step 10):
+Do this between the first `deploy` of step 10, which fails at the smoke step
+as step 7 describes, and the second one. Caddy must have run once:
 
 ```bash
 cd /opt/cdpi
@@ -192,6 +231,21 @@ sudo docker compose -f compose.yaml -f compose.staging.yaml exec -T caddy \
 sudo chmod 0644 /opt/cdpi/caddy-root.crt
 openssl x509 -in /opt/cdpi/caddy-root.crt -noout -subject -dates
 ```
+
+Verify the root against the running site exactly the way the smoke check
+does, pinned to this host and without `-k`:
+
+```bash
+curl --cacert /opt/cdpi/caddy-root.crt --resolve <ip>:443:127.0.0.1 https://<ip>/ -o /dev/null -w '%{http_code}\n'
+```
+
+Expect `200`. A `tlsv1 alert internal error` here from an older curl (8.5 on
+Ubuntu 24.04 sends no SNI for an IP literal) means the Caddyfile in
+`/opt/cdpi` predates its `default_sni` option: re-copy it per step 2 and
+`sudo docker compose -f compose.yaml -f compose.staging.yaml restart caddy`.
+
+Now set `SMOKE_CA_CERT=/opt/cdpi/caddy-root.crt` in `/etc/cdpi/deploy.env`
+(it was empty until now).
 
 Each admin fetches it once and trusts it locally:
 
@@ -207,9 +261,8 @@ sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keyc
 ```
 
 This root is only trusted for the staging host; it is not a public CA and
-signs nothing else. Set `SMOKE_CA_CERT=/opt/cdpi/caddy-root.crt` in
-`/etc/cdpi/deploy.env`, and give the same PEM to the workflow so the runner's
-smoke check can verify the certificate too:
+signs nothing else. Give the same PEM to the workflow so the runner's smoke
+check can verify the certificate too:
 
 ```bash
 gh variable set SMOKE_CA_CERT --env staging --body "$(cat cdpi-caddy-root.crt)"
@@ -234,13 +287,23 @@ Then, on the host:
 
 ```bash
 cd /opt/cdpi
-DC="docker compose -f compose.yaml -f compose.staging.yaml"
+# IMAGE_TAG=unused: compose.yaml refuses to run at all without IMAGE_TAG, and
+# /opt/cdpi/.env does not exist until the first deploy has written it.
+DC="env IMAGE_TAG=unused docker compose -f compose.yaml -f compose.staging.yaml"
 
 # database
 sudo $DC up -d db
 gunzip -c /var/tmp/prod/cdpi-prod.sql.gz | sudo $DC exec -T db sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"'
 
-# uploads into the named volume
+# uploads into the named volume. Create it with compose's own labels so
+# compose owns it: a bare `docker volume create cdpi_uploads` works too, but
+# every later compose call then warns `volume "cdpi_uploads" already exists
+# but was not created by Docker Compose`.
+sudo docker volume create \
+  --label com.docker.compose.project=cdpi \
+  --label com.docker.compose.volume=uploads \
+  --label "com.docker.compose.version=$(sudo docker compose version --short)" \
+  cdpi_uploads
 MP=$(sudo docker volume inspect -f '{{.Mountpoint}}' cdpi_uploads)
 sudo rsync -a /var/tmp/prod/uploads/ "$MP"/
 sudo chown -R 33:33 "$MP"    # www-data inside the container is uid/gid 33
@@ -252,6 +315,25 @@ replace the `rsync` into the volume with
 `sudo tar -xzf /var/tmp/prod/uploads.tar.gz -C "$MP" --strip-components=1`
 (adjust `--strip-components` to the archive's layout), then run the same
 `chown`.
+
+A host that already prints the `was not created by Docker Compose` warning
+(its volume was created by hand before this runbook said otherwise) is
+working correctly; the warning is cosmetic and safe to live with. To silence
+it, recreate the volume from the last pre-deploy snapshot with the stack
+stopped, then redeploy the current tag. The snapshot is as of the last
+deploy: if media was uploaded since, refresh it first with
+`sudo rsync -a "$(sudo docker volume inspect -f '{{.Mountpoint}}' cdpi_uploads)"/ /var/backups/cdpi/uploads-latest/`.
+
+```bash
+cd /opt/cdpi && DC="docker compose -f compose.yaml -f compose.staging.yaml"
+sudo $DC down && sudo docker volume rm cdpi_uploads
+sudo docker volume create --label com.docker.compose.project=cdpi --label com.docker.compose.volume=uploads --label "com.docker.compose.version=$(sudo docker compose version --short)" cdpi_uploads
+sudo rsync -a /var/backups/cdpi/uploads-latest/ "$(sudo docker volume inspect -f '{{.Mountpoint}}' cdpi_uploads)"/
+sudo /usr/local/sbin/cdpi-deploy-root deploy "$(sudo cat /var/lib/cdpi/current_tag)"
+```
+
+(`down` without `-v` keeps the other named volumes; the snapshot was taken
+with `rsync -a`, so the `33:33` ownership comes back with it.)
 
 Then delete the production copies from the host:
 
@@ -268,7 +350,16 @@ manifest inspect ghcr.io/centre-for-dpi/website-v2:sha-<sha>` confirms it).
 ssh -i cdpi-deploy-staging deploy@<host> deploy sha-<40-hex-sha>
 ```
 
-The host prints all ten steps. Expect `=== DEPLOY OK ...`.
+The host prints all ten steps.
+
+- **Subdomain mode:** expect `=== DEPLOY OK ...`.
+- **IP-only mode:** expect this first run to end
+  `=== DEPLOY FAILED, NO PREVIOUS TAG TO ROLL BACK TO ===` at step 7, the
+  smoke check (`HTTP 000` twelve times), with the stack left running, as step
+  7 explains. Now do step 8: export the root, verify `200` with `--cacert`,
+  set `SMOKE_CA_CERT` in `deploy.env`. Then run the same command again and
+  expect `=== DEPLOY OK ...`. The state files are written only on success, so
+  the second run is still "the first deploy" to the script.
 
 Once step 8 is done (IP-only mode) and step 6's variables are all set, run the
 same deploy through the pipeline, which is what every merge to `main` will do
