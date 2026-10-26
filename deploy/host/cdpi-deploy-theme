@@ -1,0 +1,492 @@
+#!/bin/bash
+# cdpi-deploy-theme — pull-based production deploy of the theme by git checkout.
+#
+# Production (docs/runbooks/03-production-checkout.md) is an MSP-managed host
+# behind a bastion, on which the release owner has one named account and no
+# usable sudo. Nothing can SSH in from GitHub, so the host pulls: this script,
+# installed as ~/bin/cdpi-deploy-theme and run from that account's crontab
+# every minute (`sync`), looks at the git tag `production` on origin, and when
+# the tag points at a commit other than the one checked out it moves the
+# checkout there, verifies the public site serves that commit, and moves it
+# back if it does not. The Release workflow's approved `deploy-production` job
+# is what moves the tag. No sudo, no system user, no file outside $HOME,
+# $STATE_DIR and the theme directory.
+#
+# Commands (letters, digits, dot, space, hyphen; the argument string is
+# whitelisted as a whole before it is parsed; anything else exits 126):
+#   cdpi-deploy-theme [--dry-run] sync
+#   cdpi-deploy-theme [--dry-run] status
+#   cdpi-deploy-theme [--dry-run] deploy <sha-40hex | 40hex | vX.Y.Z>
+#   cdpi-deploy-theme [--dry-run] rollback
+# `--dry-run` is only accepted as the first word; CDPI_DRY_RUN=1 in the
+# environment is the same thing. A dry run fetches, resolves and validates
+# exactly like the real thing and then prints what it would do, changing
+# nothing in the checkout or the state directory (it is logged).
+#
+# sync (cron; silent unless it acts or fails):
+#   - truncates $CRON_LOG when it exceeds $CRON_LOG_MAX_BYTES;
+#   - exits 0 at once if $STATE_DIR/paused exists (operator working by hand),
+#     if another run holds the lock, if origin has no `production` tag, if the
+#     tag's commit is already HEAD, or if this exact tag object already failed
+#     ($STATE_DIR/failed-tag: a failed release is tried once, never every
+#     minute; the workflow writes a fresh annotated tag object per dispatch, so
+#     re-dispatching the same commit is a new attempt);
+#   - otherwise runs `deploy <commit>` below in a child process and records
+#     the tag object in failed-tag if that exits non-zero.
+# deploy <target>:
+#   1. flock on $LOCK_FILE (non-blocking: a second deploy is refused);
+#   2. refuse if any tracked file in the checkout is modified — someone edited
+#      the theme on the server by hand; untracked files are ignored;
+#   3. git fetch origin $BRANCH (and the tag, for vX.Y.Z); resolve the target
+#      to a commit; refuse unless it is reachable from origin/$BRANCH, i.e. it
+#      went through a pull request;
+#   4. record the current HEAD as the rollback target ($STATE_DIR/previous);
+#   5. git checkout --detach <commit>; write <commit> to <theme>/.cdpi-build,
+#      which functions.php echoes as <meta name="cdpi-build" content="…">;
+#   6. smoke: GET $SITE_URL/ pinned to $SMOKE_RESOLVE_IP (so a CDN can never
+#      answer), up to $SMOKE_ATTEMPTS times $SMOKE_DELAY s apart, must be
+#      HTTP 200 with the marker of the deployed commit;
+#   7. on failure: check the previous commit out again, rewrite .cdpi-build,
+#      smoke again, exit 1 with "=== DEPLOY FAILED, REVERTED TO <prev> ===" or
+#      "=== DEPLOY FAILED, REVERT ALSO FAILED (wanted <prev>) ===";
+#   8. on success: $STATE_DIR/current, "=== DEPLOY OK ===", exit 0.
+#   Interactive use (through the bastion) is for when GitHub is unavailable:
+#   touch $STATE_DIR/paused first, or the next sync moves the checkout back to
+#   wherever the production tag points.
+# rollback = deploy of the commit in $STATE_DIR/previous.
+# status   = HEAD, origin/$BRANCH, local production tag, previous/current,
+#            .cdpi-build, modified tracked files, paused, last log lines.
+#
+# Exit codes: 0 ok (or nothing to do); 1 deploy failed (the site is back on
+# the previous commit, or the log says it is not); 2 refused before anything
+# changed (lock, dirty tree, unknown or unreachable target, missing checkout);
+# 126 command refused.
+#
+# Not atomic: git checkout rewrites changed files one by one, so a request in
+# that sub-second window can see a mix of two commits. Accepted for a theme
+# of this size; the container model (ADR-004) is what removes it.
+#
+# Configuration: constants below, each overridable from the environment for
+# tests (deploy/host/test-cdpi-deploy-theme.sh).
+set -euo pipefail
+
+THEME_DIR=${THEME_DIR:-/var/www/cdpi-website/wp-content/themes/cdpi-wp-theme}
+SITE_URL=${SITE_URL:-https://cdpi.dev}
+BRANCH=${BRANCH:-main}
+PRODUCTION_TAG=${PRODUCTION_TAG:-production}
+STATE_DIR=${STATE_DIR:-${HOME:?HOME is not set}/.local/state/cdpi-deploy}
+LOCK_FILE=${LOCK_FILE:-$STATE_DIR/lock}
+LOG_FILE=${LOG_FILE:-$STATE_DIR/deploy.log}
+# Where the crontab line sends sync's output; truncated by sync past the limit.
+CRON_LOG=${CRON_LOG:-$STATE_DIR/cron.log}
+CRON_LOG_MAX_BYTES=${CRON_LOG_MAX_BYTES:-1048576}
+# The smoke request connects here while keeping the site name as SNI and Host
+# header, so the certificate still has to match and no CDN is in the path.
+SMOKE_RESOLVE_IP=${SMOKE_RESOLVE_IP:-127.0.0.1}
+SMOKE_ATTEMPTS=${SMOKE_ATTEMPTS:-10}
+SMOKE_DELAY=${SMOKE_DELAY:-3}
+# Test hook: an executable run as `<cmd> <url>` instead of curl; its first
+# output line is the HTTP status code, the rest is the body.
+CDPI_SMOKE_CMD=${CDPI_SMOKE_CMD:-}
+DRY_RUN=${CDPI_DRY_RUN:-0}
+# sync runs deploy in a child process that must reuse sync's lock.
+LOCK_HELD=${CDPI_LOCK_HELD:-0}
+export THEME_DIR SITE_URL BRANCH PRODUCTION_TAG STATE_DIR LOCK_FILE LOG_FILE \
+	CRON_LOG CRON_LOG_MAX_BYTES SMOKE_RESOLVE_IP SMOKE_ATTEMPTS SMOKE_DELAY \
+	CDPI_SMOKE_CMD
+
+# Letters, digits, dot, plain space, hyphen. Nothing else, ever.
+SAFE_RE='^[A-Za-z0-9. -]+$'
+TARGET_RE='^(sha-[0-9a-f]{40}|[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+)$'
+HEX40_RE='^[0-9a-f]{40}$'
+MARKER_RE='name="cdpi-build" content="[0-9a-f]\{40\}"'
+BUILD_FILE=$THEME_DIR/.cdpi-build
+
+# Apache reads the theme as www-data: every file git writes must stay
+# world-readable whatever umask the shell or cron came with.
+umask 022
+# A fetch must fail, never wait for a password, if the remote ever needs one.
+export GIT_TERMINAL_PROMPT=0
+export LC_ALL=C
+
+# ---------------------------------------------------------------- command --
+
+cmd=$*
+
+syslog() { logger -t cdpi-deploy-theme -- "$1" 2>/dev/null || true; }
+
+reject() {
+	syslog "REJECTED (uid $(id -u)): ${cmd}"
+	echo "cdpi-deploy-theme: refused." >&2
+	echo "Usage: cdpi-deploy-theme [--dry-run] sync | status | deploy <sha-40hex|40hex|vX.Y.Z> | rollback" >&2
+	exit 126
+}
+
+# Whitelist the whole string before looking at it. This is what kills `;`,
+# `|`, `$(`, backticks, quotes, tabs and newlines.
+[[ $cmd =~ $SAFE_RE ]] || reject
+
+# Split on spaces only. Runs of spaces collapse; no globbing, no expansion.
+IFS=' ' read -r -a words <<<"$cmd"
+
+if [[ ${words[0]:-} == --dry-run ]]; then
+	DRY_RUN=1
+	words=("${words[@]:1}")
+fi
+
+action=${words[0]:-}
+target=
+
+case $action in
+status | rollback | sync)
+	[[ ${#words[@]} -eq 1 ]] || reject
+	;;
+deploy)
+	[[ ${#words[@]} -eq 2 ]] || reject
+	target=${words[1]}
+	[[ $target =~ $TARGET_RE ]] || reject
+	;;
+*)
+	reject
+	;;
+esac
+
+dry_tag=
+if [[ $DRY_RUN == 1 ]]; then dry_tag=' (dry run)'; fi
+
+# ---------------------------------------------------------------- helpers --
+
+mkdir -p "$STATE_DIR"
+
+log() {
+	local line
+	line="$(date -u +%Y-%m-%dT%H:%M:%SZ) $1"
+	printf '%s\n' "$line" >>"$LOG_FILE"
+	printf '%s\n' "$line" || true
+}
+
+# die <exit code> <message>
+die() {
+	log "REFUSED: $2"
+	exit "$1"
+}
+
+g() { git -C "$THEME_DIR" "$@"; }
+
+state_read() { cat "$STATE_DIR/$1" 2>/dev/null || true; }
+
+# state_write <name> <value>; an empty value removes the file.
+state_write() {
+	if [[ -z $2 ]]; then
+		rm -f "$STATE_DIR/$1"
+	else
+		printf '%s\n' "$2" >"$STATE_DIR/$1.tmp"
+		mv -f "$STATE_DIR/$1.tmp" "$STATE_DIR/$1"
+	fi
+}
+
+# acquire_lock: fd 9 stays open for the rest of the process (and is inherited
+# by the deploy child that sync starts, which therefore must not reopen it).
+acquire_lock() {
+	[[ $LOCK_HELD == 1 ]] && return 0
+	exec 9>>"$LOCK_FILE"
+	flock -n 9
+}
+
+check_theme_dir() {
+	local top
+	[[ -d $THEME_DIR ]] || die 2 "theme directory $THEME_DIR does not exist"
+	top=$(g rev-parse --show-toplevel 2>/dev/null) ||
+		die 2 "$THEME_DIR is not a git checkout"
+	[[ $top == "$(realpath "$THEME_DIR")" ]] ||
+		die 2 "$THEME_DIR is inside another git checkout ($top)"
+}
+
+refuse_if_dirty() {
+	local dirty
+	dirty=$(g status --porcelain --untracked-files=no)
+	[[ -z $dirty ]] && return 0
+	log "modified tracked files in $THEME_DIR:"
+	printf '%s\n' "$dirty" | head -n 20 | sed 's/^/    /'
+	die 2 "tracked files modified on the server; someone edited the theme by hand; resolve before deploying (runbook 03-production-checkout, 'dirty tree')"
+}
+
+write_build_file() {
+	printf '%s\n' "$1" >"$BUILD_FILE.tmp" &&
+		chmod 0644 "$BUILD_FILE.tmp" &&
+		mv -f "$BUILD_FILE.tmp" "$BUILD_FILE"
+}
+
+# resolve_target <target> -> prints the full commit hash, or fails.
+resolve_target() {
+	local t=$1 ref
+	case $t in
+	sha-*) ref=${t#sha-} ;;
+	v*) ref=refs/tags/$t ;;
+	*) ref=$t ;;
+	esac
+	# ^{commit} makes git read the object, so a 40-hex string that names
+	# nothing in the repository fails here instead of being echoed back.
+	g rev-parse --verify --quiet "${ref}^{commit}"
+}
+
+# smoke_fetch: one request; sets SMOKE_CODE and SMOKE_MARKER.
+SMOKE_CODE=
+SMOKE_MARKER=
+smoke_fetch() {
+	local body=$SMOKE_TMP/body err=$SMOKE_TMP/err site_host site_port rest
+	: >"$err"
+	if [[ -n $CDPI_SMOKE_CMD ]]; then
+		"$CDPI_SMOKE_CMD" "${SITE_URL%/}/" >"$SMOKE_TMP/raw" 2>"$err" || true
+		SMOKE_CODE=$(head -n 1 "$SMOKE_TMP/raw")
+		tail -n +2 "$SMOKE_TMP/raw" >"$body"
+	else
+		rest=${SITE_URL#https://}
+		rest=${rest%/}
+		site_host=${rest%%:*}
+		site_port=443
+		[[ $rest == *:* ]] && site_port=${rest##*:}
+		SMOKE_CODE=$(curl -sS --max-time 20 \
+			--resolve "$site_host:$site_port:$SMOKE_RESOLVE_IP" \
+			-o "$body" -w '%{http_code}' "${SITE_URL%/}/" 2>"$err") || SMOKE_CODE=000
+	fi
+	[[ -n $SMOKE_CODE ]] || SMOKE_CODE=000
+	SMOKE_MARKER=$(grep -o -m1 "$MARKER_RE" "$body" 2>/dev/null |
+		grep -o '[0-9a-f]\{40\}' || true)
+	[[ -s $err ]] && log "smoke: $(head -c 200 "$err" | tr '\n' ' ')"
+	return 0
+}
+
+# smoke_wait <expected commit> <strict|lenient>
+# strict:  HTTP 200 and the marker equal to <expected commit>.
+# lenient: as strict, or HTTP 200 with no 40-hex marker at all — a commit
+#          from before functions.php learned to read .cdpi-build serves
+#          content="unknown" (or no meta tag), and that is still the previous,
+#          known-good site. A different 40-hex marker is never accepted.
+smoke_wait() {
+	local want=$1 mode=$2 attempt
+	for ((attempt = 1; attempt <= SMOKE_ATTEMPTS; attempt++)); do
+		smoke_fetch
+		if [[ $SMOKE_CODE == 200 && $SMOKE_MARKER == "$want" ]]; then
+			log "smoke: OK on attempt $attempt, HTTP 200, marker $want"
+			return 0
+		fi
+		if [[ $mode == lenient && $SMOKE_CODE == 200 && -z $SMOKE_MARKER ]]; then
+			log "smoke: HTTP 200 without a build marker on attempt $attempt; accepted because the previous commit predates the .cdpi-build marker"
+			return 0
+		fi
+		log "smoke: attempt $attempt/$SMOKE_ATTEMPTS HTTP $SMOKE_CODE marker=${SMOKE_MARKER:-none} (want $want)"
+		((attempt < SMOKE_ATTEMPTS)) && sleep "$SMOKE_DELAY"
+	done
+	return 1
+}
+
+# ----------------------------------------------------------------- deploy --
+
+# revert_to <previous commit> <previous content of STATE_DIR/previous>
+# Always exits 1.
+revert_to() {
+	local prev=$1 prev_state=$2 out ok=1
+	log "reverting to $prev"
+	if out=$(g checkout --quiet --detach "$prev" 2>&1); then
+		log "git checkout --detach $prev: done"
+	else
+		log "git checkout --detach $prev FAILED: $out"
+		ok=0
+	fi
+	if write_build_file "$prev"; then
+		log "wrote $BUILD_FILE = $prev"
+	else
+		log "writing $BUILD_FILE FAILED"
+		ok=0
+	fi
+	if [[ $ok == 1 ]] && smoke_wait "$prev" lenient; then
+		# The rollback target stays what it was before this attempt, so a
+		# follow-up `rollback` can never redeploy the commit that just failed.
+		state_write previous "$prev_state"
+		log "=== DEPLOY FAILED, REVERTED TO $prev ==="
+	else
+		log "=== DEPLOY FAILED, REVERT ALSO FAILED (wanted $prev) ==="
+		log "the site may be down or serving a mix; see $LOG_FILE and runbook 03-production-checkout"
+	fi
+	exit 1
+}
+
+do_deploy() {
+	local target=$1 commit prev prev_state out
+	log "--- $action $target${dry_tag} (uid $(id -u)) ---"
+	check_theme_dir
+
+	acquire_lock || die 2 "another deploy is running (lock $LOCK_FILE)"
+
+	refuse_if_dirty
+
+	log "git fetch origin $BRANCH"
+	if [[ $target == v* ]]; then
+		# An explicit tag refspec: git refuses to move an existing tag, so a
+		# tag that was re-pointed upstream is refused rather than followed.
+		out=$(g fetch --quiet origin "$BRANCH" "refs/tags/$target:refs/tags/$target" 2>&1) ||
+			die 2 "git fetch failed (tag $target): $out"
+	else
+		out=$(g fetch --quiet origin "$BRANCH" 2>&1) ||
+			die 2 "git fetch failed: $out"
+	fi
+
+	commit=$(resolve_target "$target") ||
+		die 2 "target $target is not a commit this checkout knows after fetching origin/$BRANCH"
+	if ! g merge-base --is-ancestor "$commit" "refs/remotes/origin/$BRANCH"; then
+		die 2 "commit $commit is not reachable from origin/$BRANCH; only merged commits may be deployed"
+	fi
+	prev=$(g rev-parse --verify --quiet 'HEAD^{commit}') || die 2 "cannot read HEAD"
+	prev_state=$(state_read previous)
+
+	log "target $target -> $commit (on origin/$BRANCH)"
+	log "current HEAD $prev"
+	[[ $prev == "$commit" ]] && log "HEAD is already at the target; the checkout is a no-op and the site is re-verified"
+
+	if [[ $DRY_RUN == 1 ]]; then
+		[[ $prev != "$commit" ]] && log "DRY RUN: would write $STATE_DIR/previous = $prev"
+		log "DRY RUN: would git checkout --detach $commit in $THEME_DIR"
+		log "DRY RUN: would write $BUILD_FILE = $commit"
+		log "DRY RUN: would GET ${SITE_URL%/}/ via $SMOKE_RESOLVE_IP expecting HTTP 200 and marker $commit"
+		log "DRY RUN: would write $STATE_DIR/current = $commit, or revert to $prev"
+		log "=== DRY RUN OK: nothing changed ==="
+		return 0
+	fi
+
+	# From here on the checkout changes. A dropped terminal must not kill the
+	# script halfway through: ignore HUP, and let a closed stdout turn into a
+	# failed write (handled in log) rather than SIGPIPE.
+	trap '' HUP PIPE
+
+	SMOKE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/cdpi-smoke.XXXXXX") || die 2 "mktemp failed"
+	trap 'rm -rf "$SMOKE_TMP"' EXIT
+
+	# Recorded before the checkout so a crash mid-way still leaves the
+	# rollback target on disk for the operator.
+	if [[ $prev != "$commit" ]]; then
+		state_write previous "$prev"
+		log "wrote $STATE_DIR/previous = $prev"
+	fi
+
+	if out=$(g checkout --quiet --detach "$commit" 2>&1); then
+		log "git checkout --detach $commit: done"
+	else
+		log "git checkout --detach $commit FAILED: $out"
+		revert_to "$prev" "$prev_state"
+	fi
+
+	if write_build_file "$commit"; then
+		log "wrote $BUILD_FILE = $commit"
+	else
+		log "writing $BUILD_FILE FAILED"
+		revert_to "$prev" "$prev_state"
+	fi
+
+	log "smoke: GET ${SITE_URL%/}/ via $SMOKE_RESOLVE_IP, want HTTP 200 and marker $commit"
+	smoke_wait "$commit" strict || revert_to "$prev" "$prev_state"
+
+	state_write current "$commit"
+	state_write failed-tag ""
+	log "wrote $STATE_DIR/current = $commit"
+	log "=== DEPLOY OK ==="
+}
+
+do_rollback() {
+	local prev
+	prev=$(state_read previous)
+	[[ $prev =~ $HEX40_RE ]] ||
+		die 2 "no previous deploy recorded in $STATE_DIR/previous; use 'deploy <commit>' instead"
+	do_deploy "$prev"
+}
+
+# ------------------------------------------------------------------- sync --
+
+# quiet <message>: a reason for doing nothing. Printed only in a dry run, so
+# the once-a-minute cron run produces no output when there is nothing to do.
+quiet() {
+	[[ $DRY_RUN == 1 ]] && echo "DRY RUN: nothing to do: $1"
+	exit 0
+}
+
+do_sync() {
+	local size lines tag_id commit head failed rc=0
+
+	if [[ -f $CRON_LOG ]]; then
+		size=$(stat -c %s "$CRON_LOG" 2>/dev/null || echo 0)
+		if ((size > CRON_LOG_MAX_BYTES)) && [[ $DRY_RUN != 1 ]]; then
+			: >"$CRON_LOG"
+			log "sync: $CRON_LOG was $size bytes; truncated"
+		fi
+	fi
+
+	[[ -e $STATE_DIR/paused ]] && quiet "$STATE_DIR/paused exists"
+	check_theme_dir
+	acquire_lock || quiet "another run holds $LOCK_FILE"
+	LOCK_HELD=1
+
+	# One line per ref; an annotated tag also gets a "^{}" line with the
+	# commit it points at. The tag object id is what identifies a release
+	# attempt; the commit is what gets deployed.
+	lines=$(g ls-remote --quiet origin "refs/tags/$PRODUCTION_TAG" "refs/tags/$PRODUCTION_TAG^{}" 2>&1) ||
+		die 1 "sync: git ls-remote failed: $(printf '%s' "$lines" | tr '\n' ' ' | head -c 300)"
+	tag_id=$(printf '%s\n' "$lines" | awk -v r="refs/tags/$PRODUCTION_TAG" '$2 == r {print $1}')
+	commit=$(printf '%s\n' "$lines" | awk -v r="refs/tags/$PRODUCTION_TAG^{}" '$2 == r {print $1}')
+	[[ -n $tag_id ]] || quiet "origin has no tag $PRODUCTION_TAG"
+	[[ -n $commit ]] || commit=$tag_id
+	[[ $commit =~ $HEX40_RE ]] || die 1 "sync: tag $PRODUCTION_TAG resolves to '$commit', not a commit"
+
+	head=$(g rev-parse --verify --quiet 'HEAD^{commit}') || die 2 "cannot read HEAD"
+	[[ $commit == "$head" ]] && quiet "tag $PRODUCTION_TAG ($commit) is already checked out"
+	failed=$(state_read failed-tag)
+	[[ $tag_id == "$failed" ]] && quiet "tag object $tag_id already failed; waiting for the tag to move"
+
+	log "sync: tag $PRODUCTION_TAG ($tag_id) -> commit $commit, HEAD is $head: deploying"
+	# Make the tag visible locally for `status`; the deploy below fetches
+	# origin/$BRANCH itself and refuses anything not reachable from it.
+	g fetch --quiet --force origin "+refs/tags/$PRODUCTION_TAG:refs/tags/$PRODUCTION_TAG" 2>/dev/null || true
+
+	# A child process so that its own set -e, exits and traps stay intact
+	# while this process records the outcome. It inherits the lock on fd 9.
+	if [[ $DRY_RUN == 1 ]]; then
+		CDPI_LOCK_HELD=1 bash "${BASH_SOURCE[0]}" --dry-run deploy "$commit" || rc=$?
+		return "$rc"
+	fi
+	CDPI_LOCK_HELD=1 bash "${BASH_SOURCE[0]}" deploy "$commit" || rc=$?
+	if [[ $rc -ne 0 ]]; then
+		state_write failed-tag "$tag_id"
+		log "sync: release $tag_id (commit $commit) failed with exit $rc; not retried until tag $PRODUCTION_TAG moves (or run 'deploy' by hand)"
+		exit "$rc"
+	fi
+	log "sync: production is now at $commit"
+}
+
+# ----------------------------------------------------------------- status --
+
+do_status() {
+	local head branch paused=no
+	check_theme_dir
+	head=$(g rev-parse --verify --quiet 'HEAD^{commit}' || echo none)
+	branch=$(g symbolic-ref -q --short HEAD || echo detached)
+	if [[ -e $STATE_DIR/paused ]]; then paused=yes; fi
+	echo "theme_dir:       $THEME_DIR"
+	echo "remote:          $(g remote get-url origin 2>/dev/null || echo none)"
+	echo "head:            $head ($branch)"
+	echo "origin/$BRANCH:     $(g rev-parse --verify --quiet "refs/remotes/origin/$BRANCH" || echo none)"
+	echo "tag $PRODUCTION_TAG:  $(g rev-parse --verify --quiet "refs/tags/$PRODUCTION_TAG^{commit}" || echo "none (as last fetched)")"
+	echo "previous:        $(state_read previous)"
+	echo "current:         $(state_read current)"
+	echo "failed_tag:      $(state_read failed-tag)"
+	echo "build_file:      $(cat "$BUILD_FILE" 2>/dev/null || echo none)"
+	echo "dirty_tracked:   $(g status --porcelain --untracked-files=no | wc -l)"
+	echo "paused:          $paused"
+	echo "log:             $LOG_FILE"
+	tail -n 5 "$LOG_FILE" 2>/dev/null | sed 's/^/    /' || true
+}
+
+case $action in
+status) do_status ;;
+deploy) do_deploy "$target" ;;
+rollback) do_rollback ;;
+sync) do_sync ;;
+esac
