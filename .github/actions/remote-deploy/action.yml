@@ -4,7 +4,9 @@ description: >-
   answered by the forced-command wrapper in deploy/host/cdpi-deploy) and then
   verifies from the runner that the public site serves that build.
 
-# Used by both deploy jobs in .github/workflows/release.yml. Everything this
+# Used by the deploy-staging job in .github/workflows/release.yml (production
+# is pull-based and never reached over SSH; see deploy-production there and
+# docs/runbooks/03-production-checkout.md). Everything this
 # action needs arrives as an input; it reads no secret or variable itself, so
 # the job that calls it (and its GitHub environment) is the only place access
 # is granted. Only the tag ever crosses the SSH session: registry credentials
