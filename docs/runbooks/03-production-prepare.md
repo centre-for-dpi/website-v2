@@ -1,5 +1,12 @@
 # Runbook 03 — Production preparation (no cutover)
 
+> **Status: NOT IN USE.** This is the container model for production
+> (Docker + Caddy on the host). Production stays on the MSP-managed Lightsail
+> box where the release owner has no root and the runner has no SSH access,
+> so production runs in **checkout mode** instead: see
+> **`03-production-checkout.md`** and the ADR-004 amendment of 2026-10-26.
+> Kept for the day production leaves that box.
+
 > **Status: skeleton. To be completed in WP8**, after runbook 02 has been
 > executed end to end on staging — WP5 is what proves these steps are complete
 > enough to repeat. Everything below is either a heading to fill in or a

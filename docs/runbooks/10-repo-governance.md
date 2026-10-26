@@ -230,6 +230,47 @@ Notes on the comparison logic, so a future reader does not "fix" it:
   the script keeps it `active`** and prints a note. A routine rerun after
   activation must not quietly disarm the repository.
 
+### (f2) Ruleset on the production tag — ADR-004 amendment 2026-10-26
+
+Same endpoints as (f). Production pulls whatever commit the git tag
+`production` points at (`03-production-checkout.md`), so moving that tag *is*
+a production release or rollback; this ruleset keeps it out of Write-role
+hands. Active from creation: nothing but the Release workflow ever needs to
+touch the tag, so there is no evaluate phase.
+
+```json
+{
+  "name": "protect-production-tag",
+  "target": "tag",
+  "enforcement": "active",
+  "bypass_actors": [
+    { "actor_id": 1, "actor_type": "OrganizationAdmin", "bypass_mode": "always" },
+    { "actor_type": "DeployKey", "bypass_mode": "always" }
+  ],
+  "conditions": { "ref_name": { "include": ["refs/tags/production"], "exclude": [] } },
+  "rules": [ { "type": "creation" }, { "type": "update" }, { "type": "deletion" } ]
+}
+```
+
+Why `DeployKey` and not the Actions app: GitHub refused
+`{ "actor_id": 15368, "actor_type": "Integration" }` on this repository with
+HTTP 422 *"Actor GitHub Actions integration must be part of the ruleset
+source or owner organization"* (2026-10-26). The workflow therefore pushes
+the tag with the write deploy key `production-tag` (private half: secret
+`PRODUCTION_TAG_SSH_KEY` in the `production` environment, behind its
+reviewers), and `GITHUB_TOKEN` stays read-only. Deploy keys are repository
+scoped; the only other one that could exist would have to be added by a repo
+admin, which the audit in (a) would show.
+
+Verify after creation:
+
+```bash
+gh api repos/centre-for-dpi/website-v2/rulesets \
+  --jq '.[] | select(.name=="protect-production-tag") | {id, enforcement, target}'
+gh api repos/centre-for-dpi/website-v2/rulesets/<id> \
+  --jq '{rules: [.rules[].type], bypass: .bypass_actors, refs: .conditions.ref_name.include}'
+```
+
 ### (g) Summary
 
 Counts changes, and lists every `note:`, `warn:` and `manual:` item so nothing
@@ -260,6 +301,7 @@ on 2026-09-27:
 | --- | --- |
 | Vendor `bandekarkunal` | `write` (was `admin`) |
 | Ruleset `protect-main` | id **24081976**, **`enforcement: evaluate`**, rules `deletion`, `non_fast_forward`, `pull_request`, `required_status_checks`, bypass `OrganizationAdmin/always`, refs `~DEFAULT_BRANCH` |
+| Ruleset `protect-production-tag` | **not yet created** (2026-10-26; the agent session was not allowed to grant a bypass). Step (f2) of the script creates it with **`enforcement: active`**, target `tag`, rules `creation`, `update`, `deletion`, bypass `OrganizationAdmin/always` + `DeployKey/always`, refs `refs/tags/production`. Run `scripts/github/apply-governance.sh` (after `--check`), then record the id here. GitHub refused the Actions app (integration 15368) as a bypass actor: *"Actor GitHub Actions integration must be part of the ruleset source or owner organization"* (HTTP 422), which is why the Release workflow moves the tag with the write deploy key `production-tag` instead of `GITHUB_TOKEN` (runbook 03 §4). |
 | Environments | `build`, `staging`, `production` — all `custom_branch_policies: true`, each with branch `main` + tag `v*` |
 | `production` reviewers | `adammwaniki`, `justMuriithi`, `prevent_self_review: true` |
 | Workflow token | `read`, `can_approve_pull_request_reviews: false` |

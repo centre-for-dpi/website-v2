@@ -8,6 +8,34 @@ the audit trail.
 
 ---
 
+## 0. Production (checkout mode) — read this first
+
+Production is not a container host: it runs the theme checked out from git,
+pulled by the box itself (`03-production-checkout.md`; ADR-004 amendment
+2026-10-26). Rolling production back is **dispatching an older commit**, the
+same command as a release; nothing SSHes to the box:
+
+```bash
+gh workflow run release.yml -f image_tag=sha-<previous 40-hex> -f environment=production
+```
+
+The run summary of every production deploy prints this command with the
+commit the tag pointed at before. After approval the job moves the
+`production` tag back, the host's `sync` (cron, every minute) checks that
+commit out, verifies the site serves its marker, and the runner's poll goes
+green. Sections 1 and 3 below describe the same approval gate and the same
+automatic revert on a failed smoke (`=== DEPLOY FAILED, REVERTED TO <prev> ===`
+in `~/.local/state/cdpi-deploy/cron.log` on the box), with one difference: a
+failed release is never retried until the tag moves again.
+
+Host-side, when GitHub is unavailable (no approval trail; record it):
+`touch ~/.local/state/cdpi-deploy/paused` then `~/bin/cdpi-deploy-theme rollback`
+(runbook 03 §7). Sections 2, 4 (core versions) and 5 are container-model
+text and apply to staging only; a checkout-mode rollback never migrates the
+database, because core and plugins are not part of the release.
+
+---
+
 ## 1. Through the pipeline (preferred)
 
 A rollback is a manual dispatch of the Release workflow with an older tag.

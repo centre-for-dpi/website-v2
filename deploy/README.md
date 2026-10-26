@@ -4,7 +4,15 @@ Nothing here runs in CI and nothing here is deployed by merging this PR. These
 are the files that get copied onto the two hosts, plus the scripts those hosts
 run when GitHub Actions asks them to deploy.
 
-The pipeline's whole interface to a host is three commands over SSH:
+> **Production is not a container host (2026-10-26).** Everything below about
+> `compose.production.yaml`, `install.sh --env production`, `my.cnf` and SSH
+> deploys to production describes the container model, which is not in use.
+> Production runs the theme checked out from git, pulled by the box itself:
+> `host/cdpi-deploy-theme` (self-test `host/test-cdpi-deploy-theme.sh`),
+> runbook `docs/runbooks/03-production-checkout.md`, ADR-004 amendment.
+> The SSH model is live on staging only.
+
+The pipeline's whole interface to a (staging) host is three commands over SSH:
 
 ```
 ssh deploy@<host> deploy <sha-…40hex | vX.Y.Z>
