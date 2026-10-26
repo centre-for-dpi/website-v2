@@ -189,7 +189,8 @@ gh run list --workflow release.yml -L 1
 gh run watch <run-id>        # waits for a reviewer's approval, then moves the tag and polls
 ```
 
-A required reviewer (`adammwaniki` or `justMuriithi`, not the dispatcher)
+A required reviewer (`adammwaniki` or `justMuriithi`; the dispatcher may
+approve their own run while `prevent_self_review` is off, runbook 10 §4e)
 approves in the Actions UI. The job then: checks the commit is on `main`,
 moves `production` (annotated tag, run id in the message), and polls
 `https://cdpi.dev/` every 15 s for up to 8 minutes. On the box, within a
